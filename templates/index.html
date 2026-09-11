@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}File to Slide{% endblock %}
+{% block content %}
+  <h1>Turn content into a presentation</h1>
+  <p class="hint">
+    Paste text and/or upload a photo of notes (Bangla or English — OCR runs on both).
+    Separate slides with a blank line; the first line of each block becomes the title.
+    {% if remaining is not none %}<span class="badge">Plan limit: {{ remaining }} / window</span>{% else %}<span class="badge">Guest mode — limited free uses</span>{% endif %}
+  </p>
+
+  {% if error %}
+    <div class="error">{{ error }}</div>
+  {% endif %}
+
+  <form action="{{ url_for('generate') }}" method="post" enctype="multipart/form-data">
+    <label for="content">Content (optional if uploading a photo)</label>
+    <textarea name="content" id="content" placeholder="Photosynthesis&#10;- Converts sunlight into energy&#10;- Happens in chloroplasts&#10;&#10;Cell Structure&#10;- Nucleus controls the cell&#10;- Mitochondria produce energy"></textarea>
+
+    <label for="photo">Or upload a photo of notes (Bangla/English OCR)</label>
+    <input type="file" name="photo" id="photo" accept="image/*">
+
+    <label for="template">Template</label>
+    <select name="template" id="template">
+      {% for key, t in templates.items() %}
+        <option value="{{ key }}">{{ t.name }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="watermark_instruction">Watermark instruction (optional, natural language)</label>
+    <input type="text" name="watermark_instruction" id="watermark_instruction" placeholder="e.g. add a light gray watermark for &quot;Samiu's Tuition&quot;">
+
+    <button type="submit">Generate Presentation</button>
+  </form>
+{% endblock %}

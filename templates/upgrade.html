@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Plans{% endblock %}
+{% block content %}
+  <h1>Plans</h1>
+  <p class="hint">
+    Demo only — no real payment gateway is wired up yet (Section 9 of the
+    spec covers what's needed: Apple/Google subscription disclosure rules,
+    ToS language, etc.). This page just changes your plan field so the
+    rest of the app can be tested end-to-end.
+  </p>
+  <table>
+    <tr><th>Plan</th><th>Generations per 4-hour window</th><th></th></tr>
+    {% for plan, limit in plans.items() %}
+      <tr>
+        <td>{{ plan }}</td>
+        <td>{{ limit }}</td>
+        <td>
+          {% if user['plan'] == plan %}
+            <span class="badge">current</span>
+          {% else %}
+            <form method="post" style="margin:0;">
+              <input type="hidden" name="plan" value="{{ plan }}">
+              <button type="submit" style="padding:4px 10px; font-size:12px; margin:0;">Switch</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+  <p class="hint">In-app credit balance: ${{ "%.2f"|format(user['credits_cents'] / 100) }} (earned from Train Me contributions, non-cash)</p>
+{% endblock %}

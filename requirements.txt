@@ -1,0 +1,6 @@
+Flask==3.0.3
+python-pptx==0.6.23
+pytesseract==0.3.13
+Pillow==10.4.0
+Werkzeug==3.0.4
+anthropic==0.34.2

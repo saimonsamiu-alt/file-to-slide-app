@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}My Organization{% endblock %}
+{% block content %}
+  {% if org %}
+    <h1>{{ org['name'] }}</h1>
+    <p class="hint">Your role: {{ org['role'] }} · Plan: {{ org['plan'] }}</p>
+
+    <h3>Members</h3>
+    <table>
+      <tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr>
+      {% for m in members %}
+        <tr>
+          <td>{{ m['display_name'] or '—' }}</td>
+          <td>{{ m['email'] }}</td>
+          <td>{{ m['role'] }}</td>
+          <td>
+            {% if org['role'] == 'owner' and m['role'] != 'owner' %}
+              <form method="post" action="{{ url_for('org_revoke') }}" style="display:inline">
+                <input type="hidden" name="user_id" value="{{ m['id'] }}">
+                <button type="submit" style="background:#a00; padding:4px 10px; font-size:12px;">Revoke</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+
+    {% if org['role'] == 'owner' %}
+      <h3>Invite a contributor</h3>
+      <form method="post" action="{{ url_for('org_invite') }}">
+        <label for="role">Role</label>
+        <select name="role" id="role">
+          <option value="contributor">Contributor (upload-only)</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button type="submit">Generate invite code</button>
+      </form>
+      <p class="hint">Share the generated code — contributors join at /org/join/&lt;code&gt; after signing up.</p>
+    {% endif %}
+
+    <h3>Train Me — upload your presentation files</h3>
+    <p class="hint">Every upload requires confirming you have rights to it. Uploads earn $3 in-app credit (redeemable toward premium, not cash).</p>
+    <form method="post" action="{{ url_for('org_upload') }}" enctype="multipart/form-data">
+      <label for="deck">Presentation file</label>
+      <input type="file" name="deck" id="deck" required>
+      <label style="display:flex; align-items:center; font-weight:normal; margin-top:10px;">
+        <input type="checkbox" name="rights_confirmed" style="width:auto; margin-right:8px;">
+        I own or have rights to upload this file, and consent to it being used to train this app.
+      </label>
+      <button type="submit">Upload</button>
+    </form>
+
+    <h3>Upload history</h3>
+    <table>
+      <tr><th>Filename</th><th>Status</th></tr>
+      {% for u in uploads %}
+        <tr><td>{{ u['filename'] }}</td><td>{{ u['status'] }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p>No organization found.</p>
+  {% endif %}
+{% endblock %}
