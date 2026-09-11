@@ -3,6 +3,7 @@ Renders parsed slide data + a template choice into an actual .pptx file.
 Pure code, no AI call.
 """
 
+import os
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -15,13 +16,44 @@ def _hex_to_rgb(hex_color: str) -> RGBColor:
     return RGBColor(int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
 
 
-def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = "output.pptx"):
+def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = "output.pptx",
+                 title_page: dict = None):
+    """
+    title_page (optional): {"heading": "Samiu's Tuition", "subtitle": "topic name",
+    "contact": "WhatsApp: 01577477346"} — rendered as slide 0 when provided.
+    """
     prs = Presentation()
     blank_layout = prs.slide_layouts[6]  # fully blank layout, we control everything
 
     bg_rgb = _hex_to_rgb(template["bg_color"])
     title_rgb = _hex_to_rgb(template["title_color"])
     bullet_rgb = _hex_to_rgb(template["bullet_color"])
+
+    if title_page:
+        cover = prs.slides.add_slide(blank_layout)
+        cover.background.fill.solid()
+        cover.background.fill.fore_color.rgb = bg_rgb
+        h_box = cover.shapes.add_textbox(Inches(0.6), Inches(2.2), Inches(9), Inches(1.2))
+        h_tf = h_box.text_frame
+        h_tf.text = title_page.get("heading", "")
+        h_tf.paragraphs[0].font.size = Pt(40)
+        h_tf.paragraphs[0].font.bold = True
+        h_tf.paragraphs[0].font.color.rgb = title_rgb
+        h_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+        if title_page.get("subtitle"):
+            s_box = cover.shapes.add_textbox(Inches(0.6), Inches(3.4), Inches(9), Inches(0.8))
+            s_tf = s_box.text_frame
+            s_tf.text = title_page["subtitle"]
+            s_tf.paragraphs[0].font.size = Pt(22)
+            s_tf.paragraphs[0].font.color.rgb = bullet_rgb
+            s_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+        if title_page.get("contact"):
+            c_box = cover.shapes.add_textbox(Inches(0.6), Inches(4.6), Inches(9), Inches(0.6))
+            c_tf = c_box.text_frame
+            c_tf.text = title_page["contact"]
+            c_tf.paragraphs[0].font.size = Pt(16)
+            c_tf.paragraphs[0].font.color.rgb = bullet_rgb
+            c_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
 
     for slide_data in slides:
         slide = prs.slides.add_slide(blank_layout)
@@ -74,3 +106,24 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
 
     prs.save(out_path)
     return out_path
+
+
+def convert_pptx_to_pdf(pptx_path: str, out_dir: str) -> str:
+    """
+    Uses headless LibreOffice to convert a .pptx to .pdf (same filename,
+    .pdf extension). Requires libreoffice-impress installed on the
+    system (see Dockerfile). Raises RuntimeError with the captured
+    output if conversion fails, so the caller can show/log a clear
+    error instead of a bare crash.
+    """
+    import subprocess
+    result = subprocess.run(
+        ["soffice", "--headless", "--convert-to", "pdf", "--outdir", out_dir, pptx_path],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"PDF conversion failed: {result.stderr or result.stdout}")
+    pdf_path = os.path.join(out_dir, os.path.splitext(os.path.basename(pptx_path))[0] + ".pdf")
+    if not os.path.exists(pdf_path):
+        raise RuntimeError(f"PDF conversion did not produce an output file. Log: {result.stdout} {result.stderr}")
+    return pdf_path

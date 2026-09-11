@@ -39,6 +39,11 @@ def init_db():
         display_name TEXT,
         plan TEXT DEFAULT 'free',
         credits_cents INTEGER DEFAULT 0,   -- in-app credit, non-cash (Section 7 of spec)
+        default_watermark_text TEXT,
+        default_watermark_color TEXT,
+        default_template TEXT DEFAULT 'classic',
+        default_tuition_mode INTEGER DEFAULT 0,
+        default_whatsapp TEXT,
         created_at INTEGER
     );
 
@@ -86,6 +91,21 @@ def init_db():
         used INTEGER DEFAULT 0
     );
     """)
+
+    # Lightweight migration: if an existing users table predates the
+    # default_* columns (e.g. a local app.db from before this update),
+    # add them rather than requiring the user to delete their database.
+    existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+    for col, ddl in [
+        ("default_watermark_text", "ALTER TABLE users ADD COLUMN default_watermark_text TEXT"),
+        ("default_watermark_color", "ALTER TABLE users ADD COLUMN default_watermark_color TEXT"),
+        ("default_template", "ALTER TABLE users ADD COLUMN default_template TEXT DEFAULT 'classic'"),
+        ("default_tuition_mode", "ALTER TABLE users ADD COLUMN default_tuition_mode INTEGER DEFAULT 0"),
+        ("default_whatsapp", "ALTER TABLE users ADD COLUMN default_whatsapp TEXT"),
+    ]:
+        if col not in existing_cols:
+            c.execute(ddl)
+    conn.commit()
 
     # Ensure the "Public" org exists (Section 6 of the spec — shared template library home)
     existing = c.execute("SELECT id FROM organizations WHERE is_public = 1").fetchone()
@@ -159,6 +179,33 @@ def verify_password(email, password):
 def set_user_plan(user_id, plan):
     conn = get_db()
     conn.execute("UPDATE users SET plan = ? WHERE id = ?", (plan, user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_user_defaults(user_id, watermark_text=None, watermark_color=None,
+                          template=None, tuition_mode=None, whatsapp=None):
+    """
+    Only overwrites fields that were actually provided (non-None) —
+    so submitting a generation without touching, say, the watermark
+    field doesn't erase a previously saved default.
+    """
+    fields, values = [], []
+    if watermark_text is not None:
+        fields.append("default_watermark_text = ?"); values.append(watermark_text)
+    if watermark_color is not None:
+        fields.append("default_watermark_color = ?"); values.append(watermark_color)
+    if template is not None:
+        fields.append("default_template = ?"); values.append(template)
+    if tuition_mode is not None:
+        fields.append("default_tuition_mode = ?"); values.append(int(tuition_mode))
+    if whatsapp is not None:
+        fields.append("default_whatsapp = ?"); values.append(whatsapp)
+    if not fields:
+        return
+    values.append(user_id)
+    conn = get_db()
+    conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
     conn.commit()
     conn.close()
 
@@ -285,21 +332,33 @@ def get_org_uploads(org_id):
 
 
 # ---------- Usage / rolling-window limiter (Section 8 of the spec) ----------
+#
+# Two separate limits, because they protect different things:
+#   - General generation (rule engine only) costs nothing to run, so its
+#     limit only exists to stop abuse/server load — it can be generous.
+#   - AI-powered generation (tuition mode, real Claude API calls) costs
+#     real money per use, so it needs its own, much tighter budget-based
+#     limit, tracked separately and on a longer (daily) window.
 
 PLAN_LIMITS = {
-    "free": 5,
-    "basic": 30,
-    "pro": 150,
-    "organization": 1000,
+    "free": 30,
+    "basic": 150,
+    "pro": 500,
+    "organization": 5000,
 }
-WINDOW_SECONDS = 4 * 60 * 60  # 4-hour rolling window
+WINDOW_SECONDS = 4 * 60 * 60  # 4-hour rolling window, general usage
+
+AI_PLAN_LIMITS = {
+    "free": 3,
+    "basic": 15,
+    "pro": 60,
+    "organization": 300,
+}
+AI_WINDOW_SECONDS = 24 * 60 * 60  # 24-hour rolling window, AI usage only
 
 
-def check_and_increment_usage(subject_id, subject_type, plan="free"):
-    """
-    Returns (allowed: bool, remaining: int, seconds_until_reset: int)
-    """
-    limit = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+def _check_and_increment(subject_id, plan, limits, window_seconds, subject_type="user"):
+    limit = limits.get(plan, limits["free"])
     now = int(time.time())
     conn = get_db()
     row = conn.execute("SELECT * FROM usage_tracking WHERE subject_id = ?", (subject_id,)).fetchone()
@@ -311,23 +370,34 @@ def check_and_increment_usage(subject_id, subject_type, plan="free"):
         )
         conn.commit()
         conn.close()
-        return True, limit - 1, WINDOW_SECONDS
+        return True, limit - 1, window_seconds
 
     elapsed = now - row["window_start"]
-    if elapsed >= WINDOW_SECONDS:
+    if elapsed >= window_seconds:
         conn.execute(
             "UPDATE usage_tracking SET window_start = ?, count = 1 WHERE subject_id = ?",
             (now, subject_id),
         )
         conn.commit()
         conn.close()
-        return True, limit - 1, WINDOW_SECONDS
+        return True, limit - 1, window_seconds
 
     if row["count"] >= limit:
         conn.close()
-        return False, 0, WINDOW_SECONDS - elapsed
+        return False, 0, window_seconds - elapsed
 
     conn.execute("UPDATE usage_tracking SET count = count + 1 WHERE subject_id = ?", (subject_id,))
     conn.commit()
     conn.close()
-    return True, limit - row["count"] - 1, WINDOW_SECONDS - elapsed
+    return True, limit - row["count"] - 1, window_seconds - elapsed
+
+
+def check_and_increment_usage(subject_id, subject_type, plan="free"):
+    """General (no-AI) generation limit. Returns (allowed, remaining, seconds_until_reset)."""
+    return _check_and_increment(subject_id, plan, PLAN_LIMITS, WINDOW_SECONDS, subject_type)
+
+
+def check_and_increment_ai_usage(subject_id, subject_type, plan="free"):
+    """AI-powered (tuition mode) generation limit — separate budget, separate window."""
+    ai_subject_id = f"ai:{subject_id}"
+    return _check_and_increment(ai_subject_id, plan, AI_PLAN_LIMITS, AI_WINDOW_SECONDS, subject_type)

@@ -18,9 +18,36 @@ watermark instructions.
 - **Guest mode:** no login required to try it, with a real **server-side**
   rolling usage limit (SQLite-backed, survives server restarts — not the
   in-memory placeholder from the earlier version).
-- **File input:** paste text, upload a photo, or both. Photos run through
-  Tesseract OCR with `ben+eng` (Bangla + English together, for
-  code-switched content).
+- **File input:** paste text, upload up to 20 photos, or both. Each
+  photo becomes its own slide/question. Photos run through Tesseract
+  OCR with `ben+eng` (Bangla + English together, for code-switched
+  content).
+- **Tuition mode (`tuition_rewrite.py`):** a checkbox that runs the
+  content through a real AI call (Claude) which rewrites each question
+  in new wording, strips answers, lightly varies numbers while
+  preserving constants/atomic masses/balanced equations, keeps
+  board/university references, and auto-adds a title page (heading +
+  topic + WhatsApp number) and the "Samiu's Tuition" watermark —
+  encoding the exact rules given for Samiu's Tuition practice slides.
+  **Requires `ANTHROPIC_API_KEY`** set as an environment variable, or
+  it returns a clear error explaining that instead of crashing.
+- **PDF export:** tuition mode always outputs PDF (per the tuition
+  rules); the regular flow has a "Generate as PDF instead" button.
+  Conversion uses headless LibreOffice (`libreoffice-impress`, now in
+  the Dockerfile) — this makes the Docker image noticeably larger and
+  the first build slower, that's expected.
+- **Two-tier usage limits:** general (rule-engine) generation is cheap
+  to run, so its free-tier limit is generous (30 per 4-hour window).
+  Tuition mode makes a real paid AI call, so it has its own, much
+  tighter budget — 3 per 24 hours on the free plan — tracked
+  completely separately in `db.py` (`PLAN_LIMITS` vs `AI_PLAN_LIMITS`).
+  Turning tuition mode off has no AI limit at all. Adjust the numbers
+  in `db.py` any time — they're just constants, not a fixed design.
+- **Error handling:** `/generate` catches exceptions, logs the full
+  traceback server-side (visible in Render's Logs tab), and shows the
+  user a specific message instead of a bare "Internal Server Error" —
+  if something breaks in production, check Render's logs first, the
+  real cause will be there.
 - **Rule engine (`engine.py`):** no AI — blank-line-separated blocks
   become slides, first line = title, rest = bullets.
 - **Renderer (`renderer.py`):** builds an actual `.pptx` with 3 starter

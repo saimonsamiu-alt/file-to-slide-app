@@ -16,19 +16,37 @@
     <label for="content">Content (optional if uploading a photo)</label>
     <textarea name="content" id="content" placeholder="Photosynthesis&#10;- Converts sunlight into energy&#10;- Happens in chloroplasts&#10;&#10;Cell Structure&#10;- Nucleus controls the cell&#10;- Mitochondria produce energy"></textarea>
 
-    <label for="photo">Or upload a photo of notes (Bangla/English OCR)</label>
-    <input type="file" name="photo" id="photo" accept="image/*">
+    <label for="photos">Or upload photos of notes/questions (Bangla/English OCR) — you can select multiple</label>
+    <input type="file" name="photos" id="photos" accept="image/*" multiple>
+    <p class="hint" style="margin-top:-6px;">Each photo becomes its own slide/question. You can select up to 20 at once.</p>
 
     <label for="template">Template</label>
     <select name="template" id="template">
       {% for key, t in templates.items() %}
-        <option value="{{ key }}">{{ t.name }}</option>
+        <option value="{{ key }}" {% if defaults and defaults.template == key %}selected{% endif %}>{{ t.name }}</option>
       {% endfor %}
     </select>
 
     <label for="watermark_instruction">Watermark instruction (optional, natural language)</label>
-    <input type="text" name="watermark_instruction" id="watermark_instruction" placeholder="e.g. add a light gray watermark for &quot;Samiu's Tuition&quot;">
+    <input type="text" name="watermark_instruction" id="watermark_instruction"
+           value="{{ defaults.watermark_instruction if defaults else '' }}"
+           placeholder="e.g. add a light gray watermark for &quot;Samiu's Tuition&quot;">
+
+    <label style="display:flex; align-items:center; font-weight:normal; margin-top:14px;">
+      <input type="checkbox" name="tuition_mode" style="width:auto; margin-right:8px;" {% if defaults and defaults.tuition_mode %}checked{% endif %}>
+      Tuition mode — rewrite questions in new wording, strip answers, lightly vary numbers (keeps constants/atomic masses/balanced equations unchanged), and auto-add the title page + watermark.
+    </label>
+    <input type="text" name="tuition_topic" placeholder="Topic name for the title page (e.g. ম্যাট্রিক্সের মাত্রা ও গঠন)" style="margin-top:8px;">
+    <label for="whatsapp">WhatsApp number for the title page (only used in Tuition mode)</label>
+    <input type="text" name="whatsapp" id="whatsapp" value="{{ defaults.whatsapp if defaults else '' }}" placeholder="e.g. 01577477346">
+
+    {% if current_user %}
+      <p class="hint" style="margin-top:10px;">Signed in — whatever you enter above (watermark, template, tuition mode, WhatsApp number) is saved automatically and will be pre-filled next time. No need to retype it.</p>
+    {% else %}
+      <p class="hint" style="margin-top:10px;"><a href="{{ url_for('signup') }}">Sign up</a> to have your watermark/template/settings remembered automatically instead of retyping them every time.</p>
+    {% endif %}
 
     <button type="submit">Generate Presentation</button>
+    <button type="submit" name="format" value="pdf" class="btn-ghost" style="width:100%; background:transparent; color:#1F3864; border:1px solid #1F3864; margin-top:10px;">Generate as PDF instead</button>
   </form>
 {% endblock %}

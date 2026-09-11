@@ -15,14 +15,20 @@ buildable without a live payment processor:
 
 import os
 import time
+import logging
 import functools
+import traceback
 from flask import Flask, request, render_template, send_file, redirect, url_for, session, flash
 
 import db
 from engine import parse_content_to_slides, apply_watermark_instruction, TEMPLATES
-from renderer import render_pptx
+from renderer import render_pptx, convert_pptx_to_pdf
 from ocr import extract_text_from_image
 from instruction_parser import parse_instruction
+from tuition_rewrite import rewrite_for_tuition
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("slideapp")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-this-in-production")
@@ -128,13 +134,36 @@ def reset_password(token):
 def index():
     user = current_user()
     remaining = None
+    defaults = {"watermark_instruction": "", "template": "classic", "tuition_mode": False, "whatsapp": ""}
     if user:
         remaining = db.PLAN_LIMITS.get(user["plan"], db.PLAN_LIMITS["free"])
-    return render_template("index.html", templates=TEMPLATES, remaining=remaining)
+        defaults["watermark_instruction"] = user["default_watermark_text"] or ""
+        defaults["template"] = user["default_template"] or "classic"
+        defaults["tuition_mode"] = bool(user["default_tuition_mode"])
+        defaults["whatsapp"] = user["default_whatsapp"] or ""
+    return render_template("index.html", templates=TEMPLATES, remaining=remaining, defaults=defaults)
+
+
+MAX_PHOTOS = 20
 
 
 @app.route("/generate", methods=["POST"])
 def generate():
+    try:
+        return _generate_impl()
+    except Exception as exc:
+        # Log the full traceback server-side (visible in Render's logs)
+        # instead of letting it surface as a bare "Internal Server Error"
+        # with no way to diagnose it.
+        logger.error("generate() failed: %s\n%s", exc, traceback.format_exc())
+        return render_template(
+            "index.html", templates=TEMPLATES,
+            error=f"Something went wrong while generating: {exc}. "
+                  f"(Full details were logged server-side.)",
+        )
+
+
+def _generate_impl():
     user = current_user()
     if user:
         subject_id, subject_type, plan = user["id"], "user", user["plan"]
@@ -151,32 +180,107 @@ def generate():
         )
 
     text_content = request.form.get("content", "").strip()
-    uploaded_file = request.files.get("photo")
+    uploaded_photos = request.files.getlist("photos")[:MAX_PHOTOS]
 
-    if uploaded_file and uploaded_file.filename:
-        photo_path = os.path.join(UPLOAD_DIR, f"{int(time.time())}_{uploaded_file.filename}")
-        uploaded_file.save(photo_path)
-        ocr_text = extract_text_from_image(photo_path)
-        text_content = (text_content + "\n\n" + ocr_text).strip() if text_content else ocr_text
+    ocr_blocks = []
+    for photo in uploaded_photos:
+        if not photo or not photo.filename:
+            continue
+        photo_path = os.path.join(UPLOAD_DIR, f"{int(time.time())}_{photo.filename}")
+        photo.save(photo_path)
+        try:
+            ocr_text = extract_text_from_image(photo_path)
+        except Exception as exc:
+            raise RuntimeError(f"OCR failed on '{photo.filename}': {exc}")
+        if ocr_text:
+            ocr_blocks.append(ocr_text)
+
+    # each photo becomes its own slide/question block, separated by a
+    # blank line so the rule engine treats them as separate slides
+    if ocr_blocks:
+        photo_text = "\n\n".join(ocr_blocks)
+        text_content = (text_content + "\n\n" + photo_text).strip() if text_content else photo_text
 
     if not text_content:
-        return render_template("index.html", templates=TEMPLATES, error="Please paste content or upload a photo.")
+        return render_template("index.html", templates=TEMPLATES, error="Please paste content or upload at least one photo.")
 
-    template_key = request.form.get("template", "classic")
+    template_key = request.form.get("template", "").strip()
+    if not template_key and user:
+        template_key = user["default_template"] or "classic"
+    template_key = template_key or "classic"
     template = TEMPLATES.get(template_key, TEMPLATES["classic"])
 
+    tuition_mode_submitted = request.form.get("tuition_mode") == "on"
+    tuition_topic = request.form.get("tuition_topic", "").strip()
+    whatsapp = request.form.get("whatsapp", "").strip()
+    if not whatsapp and user:
+        whatsapp = user["default_whatsapp"] or ""
+
+    tuition_mode = tuition_mode_submitted
+
+    if tuition_mode:
+        ai_allowed, ai_remaining, ai_seconds_left = db.check_and_increment_ai_usage(subject_id, subject_type, plan)
+        if not ai_allowed:
+            hours = ai_seconds_left // 3600
+            return render_template(
+                "index.html", templates=TEMPLATES,
+                error=f"Tuition mode (AI) limit reached for today. Try again in ~{hours} hours, "
+                      f"or turn off tuition mode to keep generating with the free rule-based engine "
+                      f"(no AI limit on that).",
+            )
+
     watermark_instruction = request.form.get("watermark_instruction", "").strip()
+    if not watermark_instruction and user and user["default_watermark_text"]:
+        # re-parse the saved default text the same way a fresh instruction would be
+        watermark_instruction = user["default_watermark_text"]
     watermark = None
     if watermark_instruction:
         parsed = parse_instruction(watermark_instruction)
         watermark = apply_watermark_instruction(parsed)
 
-    slides = parse_content_to_slides(text_content)
-    filename = f"{int(time.time())}_{(user['id'] if user else 'guest')}.pptx"
-    out_path = os.path.join(GENERATED_DIR, filename)
-    render_pptx(slides, template, watermark=watermark, out_path=out_path)
+    title_page = None
 
-    return send_file(out_path, as_attachment=True, download_name="presentation.pptx")
+    if tuition_mode:
+        # AI rewrite per Samiu's Tuition rules — raises a clear
+        # RuntimeError (shown to the user) if no API key is configured.
+        slides = rewrite_for_tuition(text_content)
+        if not watermark:
+            watermark = apply_watermark_instruction({"text": "Samiu's Tuition"})
+        title_page = {
+            "heading": "Samiu's Tuition",
+            "subtitle": tuition_topic,
+            "contact": f"WhatsApp: {whatsapp}" if whatsapp else "",
+        }
+    else:
+        slides = parse_content_to_slides(text_content)
+
+    # Save whatever the user actually entered this time as their new
+    # default, so they don't have to retype it next visit. Only
+    # overwrites fields they touched (empty fields fall back to the
+    # existing default above and aren't re-saved as blank).
+    if user:
+        db.update_user_defaults(
+            user["id"],
+            watermark_text=(request.form.get("watermark_instruction", "").strip() or None),
+            template=template_key,
+            tuition_mode=tuition_mode_submitted,
+            whatsapp=(request.form.get("whatsapp", "").strip() or None),
+        )
+
+    base_name = f"{int(time.time())}_{(user['id'] if user else 'guest')}"
+    pptx_path = os.path.join(GENERATED_DIR, f"{base_name}.pptx")
+    render_pptx(slides, template, watermark=watermark, out_path=pptx_path, title_page=title_page)
+
+
+    want_pdf = request.form.get("format") == "pdf" or tuition_mode
+    if want_pdf:
+        try:
+            pdf_path = convert_pptx_to_pdf(pptx_path, GENERATED_DIR)
+            return send_file(pdf_path, as_attachment=True, download_name="presentation.pdf")
+        except Exception as exc:
+            raise RuntimeError(f"Generated the slides but PDF conversion failed: {exc}")
+
+    return send_file(pptx_path, as_attachment=True, download_name="presentation.pptx")
 
 
 @app.route("/org")
