@@ -29,7 +29,7 @@ watermark instructions.
   board/university references, and auto-adds a title page (heading +
   topic + WhatsApp number) and the "Samiu's Tuition" watermark —
   encoding the exact rules given for Samiu's Tuition practice slides.
-  **Requires `ANTHROPIC_API_KEY`** set as an environment variable, or
+  **Requires `GEMINI_API_KEY`** set as an environment variable, or
   it returns a clear error explaining that instead of crashing.
 - **PDF export:** tuition mode always outputs PDF (per the tuition
   rules); the regular flow has a "Generate as PDF instead" button.
@@ -56,7 +56,7 @@ watermark instructions.
 - **Instruction parsing (`instruction_parser.py`):** free-text watermark
   commands (e.g. *"add a light watermark for 'Samiu's Tuition'"*) are
   parsed into structured params. Works with **zero AI cost** out of the
-  box via a regex/keyword parser. If you set an `ANTHROPIC_API_KEY`
+  box via a regex/keyword parser. If you set a `GEMINI_API_KEY`
   environment variable, it automatically upgrades to a real (cheap)
   Claude API call for more robust parsing of arbitrary phrasing, with
   automatic fallback to the free parser if the call fails.
@@ -87,7 +87,7 @@ Open `http://localhost:5000`.
 
 Optional — enable real AI-based instruction parsing:
 ```bash
-export ANTHROPIC_API_KEY=your-key-here
+export GEMINI_API_KEY=your-key-here
 python app.py
 ```
 

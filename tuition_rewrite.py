@@ -15,7 +15,7 @@ Tuition's exact rules (as given by the user):
      students solve the problem.
 
 This requires a real AI call (semantic rewriting is not something a
-rule-based engine can do). Needs ANTHROPIC_API_KEY configured.
+rule-based engine can do). Needs GEMINI_API_KEY configured.
 """
 
 import os
@@ -40,27 +40,33 @@ Each distinct question or notes-section becomes one slide."""
 def rewrite_for_tuition(raw_text: str):
     """
     Returns a list of {"title":..., "bullets":[...]} slides, rewritten
-    per the tuition rules above. Raises RuntimeError if no API key is
-    configured or the call fails, so the caller can show a clear
-    message rather than silently falling back to unrewritten text
-    (falling back silently would violate rule 1/2 unnoticed).
+    per the tuition rules above, using Google's Gemini API (free-tier
+    friendly). Raises RuntimeError if no API key is configured or the
+    call fails, so the caller can show a clear message rather than
+    silently falling back to unrewritten text (a silent fallback would
+    violate rule 1/2 unnoticed).
     """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("GEMINI_API_KEY"):
         raise RuntimeError(
-            "Tuition mode needs an ANTHROPIC_API_KEY configured on the server "
+            "Tuition mode needs a GEMINI_API_KEY configured on the server "
             "to do the AI rewriting — ask whoever manages the deployment to "
-            "add it under Environment variables."
+            "add it under Environment variables. Get a free key at "
+            "aistudio.google.com/apikey."
         )
 
-    import anthropic
-    client = anthropic.Anthropic()
-    resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
-        system=TUITION_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": raw_text}],
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    resp = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=raw_text,
+        config=types.GenerateContentConfig(
+            system_instruction=TUITION_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+        ),
     )
-    text = resp.content[0].text.strip()
+    text = resp.text.strip()
     text = re.sub(r"^```json|```$", "", text).strip()
     data = json.loads(text)
     return data.get("slides", [])

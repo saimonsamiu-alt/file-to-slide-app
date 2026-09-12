@@ -3,7 +3,7 @@ Turns a free-text instruction like "add a light watermark for Samiu's
 Tuition in blue" into structured params: {text, opacity, color, position}.
 
 Two modes:
-1. If ANTHROPIC_API_KEY is set in the environment, use a real (cheap,
+1. If GEMINI_API_KEY is set in the environment, use a real (free-tier-friendly,
    small) Claude API call for robust parsing of arbitrary phrasing.
 2. Otherwise, fall back to a simple regex/keyword parser that covers the
    common cases for free — this is what runs by default in this MVP so
@@ -52,10 +52,11 @@ def _regex_parse(instruction: str) -> dict:
 
 
 def _ai_parse(instruction: str) -> dict:
-    """Optional real AI parse — only runs if an API key is configured."""
-    import anthropic
+    """Optional real AI parse — only runs if a Gemini API key is configured."""
+    from google import genai
+    from google.genai import types
 
-    client = anthropic.Anthropic()
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     prompt = (
         "Parse this watermark instruction into JSON with keys "
         "text, opacity ('light' or 'dark' or null), color (hex code or null), "
@@ -63,12 +64,12 @@ def _ai_parse(instruction: str) -> dict:
         "Return ONLY the JSON, nothing else.\n\n"
         f"Instruction: {instruction}"
     )
-    resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
+    resp = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
-    text = resp.content[0].text.strip()
+    text = resp.text.strip()
     text = re.sub(r"^```json|```$", "", text).strip()
     return json.loads(text)
 
@@ -77,7 +78,7 @@ def parse_instruction(instruction: str) -> dict:
     if not instruction or not instruction.strip():
         return {"text": None, "opacity": None, "color": None, "position": "diagonal-center"}
 
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get("GEMINI_API_KEY"):
         try:
             return _ai_parse(instruction)
         except Exception:
