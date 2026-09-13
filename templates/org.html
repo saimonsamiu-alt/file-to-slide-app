@@ -79,18 +79,24 @@
     {% endif %}
 
     <h3>Train Me — upload your presentation files</h3>
-    <p class="hint">Every upload requires confirming you have rights to it. Uploads earn $3 in-app credit (redeemable toward premium, not cash). Only .pptx and .pdf files can currently be parsed into training data — other formats are stored but not processed yet.</p>
+    <p class="hint">Every upload requires confirming you have rights to it. Uploads earn $3 in-app credit each (redeemable toward premium, not cash) — identical files you've already uploaded are detected and skipped, no extra credit. Only .pptx and .pdf files can currently be parsed into training data — other formats are stored but not processed yet. You can select multiple files at once (up to 20 per batch).</p>
     <form method="post" action="{{ url_for('org_upload') }}" enctype="multipart/form-data">
-      <label for="deck">Presentation file</label>
-      <input type="file" name="deck" id="deck" required>
+      <label for="deck">Presentation file(s)</label>
+      <input type="file" name="deck" id="deck" multiple required>
       <label style="display:flex; align-items:center; font-weight:normal; margin-top:10px;">
         <input type="checkbox" name="rights_confirmed" style="width:auto; margin-right:8px;">
-        I own or have rights to upload this file, and consent to it being used to train this app.
+        I own or have rights to upload these files, and consent to them being used to train this app.
       </label>
       <button type="submit">Upload</button>
     </form>
 
     <h3>Upload history</h3>
+    {% set pending_exists = uploads | selectattr('status', 'equalto', 'pending') | list %}
+    {% if pending_exists %}
+      <form method="post" action="{{ url_for('org_reprocess') }}" style="margin-bottom:10px;">
+        <button type="submit" class="btn-ghost" style="width:auto; padding:8px 16px;">Reprocess stuck "pending" uploads ({{ pending_exists | length }})</button>
+      </form>
+    {% endif %}
     <table>
       <tr><th>Filename</th><th>Status</th></tr>
       {% for u in uploads %}

@@ -85,6 +85,7 @@ def init_db():
         uploaded_by TEXT NOT NULL,
         filename TEXT NOT NULL,
         file_data BYTEA,
+        content_hash TEXT,
         rights_confirmed INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
         created_at INTEGER,
@@ -134,6 +135,8 @@ def init_db():
     existing_upload_cols = {row["column_name"] for row in c.fetchall()}
     if "file_data" not in existing_upload_cols:
         c.execute("ALTER TABLE org_uploads ADD COLUMN file_data BYTEA")
+    if "content_hash" not in existing_upload_cols:
+        c.execute("ALTER TABLE org_uploads ADD COLUMN content_hash TEXT")
     conn.commit()
 
     # Ensure the "Public" org exists (Section 6 of the spec — shared template library home)
@@ -355,25 +358,43 @@ def get_org_members(org_id):
     return rows
 
 
-def add_org_upload(org_id, uploaded_by, filename, rights_confirmed, file_data=None):
+def add_org_upload(org_id, uploaded_by, filename, rights_confirmed, file_data=None, content_hash=None):
     """
     file_data: raw bytes of the uploaded file, stored directly in the
     database so it survives redeploys (no separate object storage
     needed at this scale).
+    content_hash: sha256 hex digest of file_data — used for duplicate
+    detection (find_upload_by_hash) so the same file re-uploaded
+    doesn't get credited/processed twice.
     """
     conn = get_db()
     c = conn.cursor()
     upload_id = str(uuid.uuid4())
     c.execute(
-        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, file_data, rights_confirmed, status, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, file_data, content_hash, rights_confirmed, status, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (upload_id, org_id, uploaded_by, filename,
          psycopg2.Binary(file_data) if file_data else None,
+         content_hash,
          int(rights_confirmed), "pending", int(time.time())),
     )
     conn.commit()
     conn.close()
     return upload_id
+
+
+def find_upload_by_hash(org_id, content_hash):
+    """Returns the existing upload row with this content hash in this
+    org, or None — used to detect and skip duplicate uploads."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, filename, status FROM org_uploads WHERE org_id = %s AND content_hash = %s LIMIT 1",
+        (org_id, content_hash),
+    )
+    row = c.fetchone()
+    conn.close()
+    return row
 
 
 def get_org_uploads(org_id):

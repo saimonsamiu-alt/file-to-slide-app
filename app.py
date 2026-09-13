@@ -147,6 +147,7 @@ def index():
 
 
 MAX_PHOTOS = 20
+MAX_TRAIN_UPLOADS = 20  # per batch, to keep each request's processing time reasonable
 
 
 @app.route("/generate", methods=["POST"])
@@ -368,36 +369,101 @@ def org_upload():
     if not orgs:
         return redirect(url_for("org_dashboard"))
     org = orgs[0]
-    f = request.files.get("deck")
+    files = request.files.getlist("deck")
     rights_confirmed = request.form.get("rights_confirmed") == "on"
-    if not f or not f.filename:
-        flash("Please choose a file.")
+    files = [f for f in files if f and f.filename]
+
+    if not files:
+        flash("Please choose at least one file.")
         return redirect(url_for("org_dashboard"))
     if not rights_confirmed:
-        flash("You must confirm you have rights to upload this file.")
+        flash("You must confirm you have rights to upload these files.")
         return redirect(url_for("org_dashboard"))
-    file_bytes = f.read()
-    upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True, file_data=file_bytes)
-    db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
 
-    # Run the parsing + AI-labeling pipeline right away (Section 5 of
-    # the spec) — this is what actually turns the upload into training
-    # data, instead of it just sitting as a stored file.
-    try:
-        status, parsed_slides = process_upload(f.filename, file_bytes)
-        if status == "processed" and parsed_slides:
-            db.save_parsed_slides(upload_id, org["id"], parsed_slides)
-        db.set_upload_status(upload_id, status)
-        if status == "processed":
-            flash(f"Uploaded and processed — {len(parsed_slides)} slides parsed and labeled for training.")
-        elif status == "unsupported_format":
-            flash("Uploaded and credited, but this file type isn't parseable yet (only .pptx and .pdf are supported for training data extraction).")
-        else:
-            flash("Uploaded and credited, but parsing this file failed — it's stored, but not yet usable as training data.")
-    except Exception as exc:
-        logger.error("Train Me processing failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
-        flash("Uploaded and credited, but processing hit an error (logged for review).")
+    import hashlib
+    processed_n, duplicate_n, failed_n, unsupported_n = 0, 0, 0, 0
 
+    for f in files[:MAX_TRAIN_UPLOADS]:
+        file_bytes = f.read()
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        existing = db.find_upload_by_hash(org["id"], content_hash)
+        if existing:
+            duplicate_n += 1
+            continue  # identical file already uploaded — no credit, no reprocessing
+
+        upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True,
+                                       file_data=file_bytes, content_hash=content_hash)
+        db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
+
+        # Run the parsing + AI-labeling pipeline right away (Section 5
+        # of the spec). The status is ALWAYS set to something terminal
+        # here — even on a hard failure — so uploads never get stuck
+        # showing "pending" forever with no explanation.
+        try:
+            status, parsed_slides = process_upload(f.filename, file_bytes)
+            if status == "processed" and parsed_slides:
+                db.save_parsed_slides(upload_id, org["id"], parsed_slides)
+            db.set_upload_status(upload_id, status)
+            if status == "processed":
+                processed_n += 1
+            elif status == "unsupported_format":
+                unsupported_n += 1
+            else:
+                failed_n += 1
+        except Exception as exc:
+            logger.error("Train Me processing failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
+            db.set_upload_status(upload_id, "failed")
+            failed_n += 1
+
+    parts = []
+    if processed_n:
+        parts.append(f"{processed_n} processed")
+    if duplicate_n:
+        parts.append(f"{duplicate_n} skipped as duplicates (already uploaded, no extra credit)")
+    if unsupported_n:
+        parts.append(f"{unsupported_n} unsupported format (only .pptx/.pdf are parsed)")
+    if failed_n:
+        parts.append(f"{failed_n} failed to process (logged for review)")
+    flash("Upload complete — " + ", ".join(parts) + ".")
+
+    return redirect(url_for("org_dashboard"))
+
+
+@app.route("/org/reprocess", methods=["POST"])
+@login_required
+def org_reprocess():
+    """
+    Retries any uploads stuck at 'pending' (e.g. ones uploaded before
+    a bug fix, or that hit a transient error) without needing to
+    re-upload the file — the bytes are already stored in the DB.
+    """
+    user = current_user()
+    orgs = db.get_user_orgs(user["id"])
+    if not orgs:
+        return redirect(url_for("org_dashboard"))
+    org = orgs[0]
+    stuck = [u for u in db.get_org_uploads(org["id"]) if u["status"] == "pending"]
+
+    retried, fixed = 0, 0
+    for u in stuck[:MAX_TRAIN_UPLOADS]:
+        row = db.get_org_upload_file(u["id"])
+        if not row or not row["file_data"]:
+            db.set_upload_status(u["id"], "failed")
+            continue
+        retried += 1
+        try:
+            status, parsed_slides = process_upload(row["filename"], bytes(row["file_data"]))
+            if status == "processed" and parsed_slides:
+                db.save_parsed_slides(u["id"], org["id"], parsed_slides)
+            db.set_upload_status(u["id"], status)
+            if status == "processed":
+                fixed += 1
+        except Exception as exc:
+            logger.error("Reprocess failed for %s: %s\n%s", row["filename"], exc, traceback.format_exc())
+            db.set_upload_status(u["id"], "failed")
+
+    flash(f"Reprocessed {retried} stuck upload(s) — {fixed} now processed successfully.")
     return redirect(url_for("org_dashboard"))
 
 
