@@ -16,9 +16,96 @@
     <label for="content">Content (optional if uploading a photo)</label>
     <textarea name="content" id="content" placeholder="Photosynthesis&#10;- Converts sunlight into energy&#10;- Happens in chloroplasts&#10;&#10;Cell Structure&#10;- Nucleus controls the cell&#10;- Mitochondria produce energy"></textarea>
 
-    <label for="photos">Or upload photos of notes/questions (Bangla/English OCR) — you can select multiple</label>
-    <input type="file" name="photos" id="photos" accept="image/*" multiple>
-    <p class="hint" style="margin-top:-6px;">Each photo becomes its own slide/question. You can select up to 20 at once.</p>
+    <label>Or upload photos of notes/questions (Bangla/English OCR) — click a box to choose a file, or just paste (Ctrl+V) an image</label>
+    <div id="dropzone-grid" style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px;"></div>
+    <input type="file" name="photos" id="photos" accept="image/*" multiple style="display:none;">
+    <p class="hint" style="margin-top:0;">Each photo becomes its own slide/question. Up to 20 at once — click any empty box, drag a file onto it, or paste a copied image while the page is focused.</p>
+
+    <script>
+    (function() {
+      const MAX_PHOTOS = 20;
+      const grid = document.getElementById('dropzone-grid');
+      const realInput = document.getElementById('photos');
+      let files = [];
+
+      function boxStyle() {
+        return 'width:90px; height:90px; border:2px dashed #ccc; border-radius:8px; display:flex; align-items:center; justify-content:center; cursor:pointer; position:relative; overflow:hidden; background:#fafafa; font-size:28px; color:#bbb;';
+      }
+
+      function syncRealInput() {
+        const dt = new DataTransfer();
+        files.forEach(f => dt.items.add(f));
+        realInput.files = dt.files;
+      }
+
+      function removeFile(index) {
+        files.splice(index, 1);
+        syncRealInput();
+        render();
+      }
+
+      function addFiles(newFiles) {
+        for (const f of newFiles) {
+          if (files.length >= MAX_PHOTOS) break;
+          if (f.type && f.type.startsWith('image/')) files.push(f);
+        }
+        syncRealInput();
+        render();
+      }
+
+      function render() {
+        grid.innerHTML = '';
+        files.forEach((f, i) => {
+          const box = document.createElement('div');
+          box.style.cssText = boxStyle();
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(f);
+          img.style.cssText = 'width:100%; height:100%; object-fit:cover;';
+          box.appendChild(img);
+          const x = document.createElement('div');
+          x.textContent = '×';
+          x.style.cssText = 'position:absolute; top:2px; right:6px; color:#fff; background:rgba(0,0,0,0.5); border-radius:50%; width:18px; height:18px; text-align:center; line-height:18px; font-size:14px; cursor:pointer;';
+          x.onclick = (e) => { e.stopPropagation(); removeFile(i); };
+          box.appendChild(x);
+          grid.appendChild(box);
+        });
+        if (files.length < MAX_PHOTOS) {
+          const empty = document.createElement('div');
+          empty.style.cssText = boxStyle();
+          empty.textContent = '+';
+          empty.title = 'Click to choose, drag a file here, or paste (Ctrl+V)';
+          empty.onclick = () => {
+            const picker = document.createElement('input');
+            picker.type = 'file';
+            picker.accept = 'image/*';
+            picker.multiple = true;
+            picker.onchange = () => addFiles(picker.files);
+            picker.click();
+          };
+          empty.ondragover = (e) => { e.preventDefault(); empty.style.borderColor = '#1F3864'; };
+          empty.ondragleave = () => { empty.style.borderColor = '#ccc'; };
+          empty.ondrop = (e) => {
+            e.preventDefault();
+            addFiles(e.dataTransfer.files);
+          };
+          grid.appendChild(empty);
+        }
+      }
+
+      document.addEventListener('paste', (e) => {
+        const items = (e.clipboardData || window.clipboardData).items;
+        const pasted = [];
+        for (const item of items) {
+          if (item.kind === 'file' && item.type.startsWith('image/')) {
+            pasted.push(item.getAsFile());
+          }
+        }
+        if (pasted.length) addFiles(pasted);
+      });
+
+      render();
+    })();
+    </script>
 
     <label for="template">Template</label>
     <select name="template" id="template">

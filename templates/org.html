@@ -2,8 +2,48 @@
 {% block title %}My Organization{% endblock %}
 {% block content %}
   {% if org %}
-    <h1>{{ org['name'] }}</h1>
+    <h1>{{ org['name'] }} — Admin</h1>
     <p class="hint">Your role: {{ org['role'] }} · Plan: {{ org['plan'] }}</p>
+
+    <h3>Training progress overview</h3>
+    <div style="display:flex; gap:16px; margin-bottom:18px; flex-wrap:wrap;">
+      <div style="background:#F7F5EF; border:1px solid #eee; border-radius:8px; padding:14px 20px; min-width:120px;">
+        <div style="font-size:24px; font-weight:bold; color:#1F3864;">{{ total_slides }}</div>
+        <div class="hint" style="margin:0;">Total slides collected</div>
+      </div>
+      <div style="background:#F7F5EF; border:1px solid #eee; border-radius:8px; padding:14px 20px; min-width:120px;">
+        <div style="font-size:24px; font-weight:bold; color:#1F3864;">{{ processed_count }}</div>
+        <div class="hint" style="margin:0;">Files processed</div>
+      </div>
+      <div style="background:#F7F5EF; border:1px solid #eee; border-radius:8px; padding:14px 20px; min-width:120px;">
+        <div style="font-size:24px; font-weight:bold; color:#1F3864;">{{ pending_count }}</div>
+        <div class="hint" style="margin:0;">Pending</div>
+      </div>
+      {% if failed_count %}
+      <div style="background:#FBEAE8; border:1px solid #F0C9C4; border-radius:8px; padding:14px 20px; min-width:120px;">
+        <div style="font-size:24px; font-weight:bold; color:#a00;">{{ failed_count }}</div>
+        <div class="hint" style="margin:0;">Failed / unsupported</div>
+      </div>
+      {% endif %}
+    </div>
+
+    <p class="hint">Each category needs ~{{ category_target }} labeled slides before it's "enough" to eventually train a model on (Section 12 of the spec). Progress below is live — it updates with every processed upload.</p>
+
+    {% if progress %}
+      {% for p in progress %}
+        <div style="margin-bottom:14px;">
+          <div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:4px;">
+            <span><b>{{ p.category }}</b></span>
+            <span>{{ p.count }} / {{ category_target }} &mdash; {{ p.remaining }} more needed</span>
+          </div>
+          <div style="background:#eee; border-radius:6px; height:14px; overflow:hidden;">
+            <div style="background:{{ '#2E7D32' if p.pct >= 100 else '#1F3864' }}; height:100%; width:{{ p.pct }}%;"></div>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="hint">No processed slides yet — upload a .pptx or .pdf below to start.</p>
+    {% endif %}
 
     <h3>Members</h3>
     <table>
@@ -39,7 +79,7 @@
     {% endif %}
 
     <h3>Train Me — upload your presentation files</h3>
-    <p class="hint">Every upload requires confirming you have rights to it. Uploads earn $3 in-app credit (redeemable toward premium, not cash).</p>
+    <p class="hint">Every upload requires confirming you have rights to it. Uploads earn $3 in-app credit (redeemable toward premium, not cash). Only .pptx and .pdf files can currently be parsed into training data — other formats are stored but not processed yet.</p>
     <form method="post" action="{{ url_for('org_upload') }}" enctype="multipart/form-data">
       <label for="deck">Presentation file</label>
       <input type="file" name="deck" id="deck" required>

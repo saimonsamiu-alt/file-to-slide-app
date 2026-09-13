@@ -24,27 +24,27 @@ import re
 
 TUITION_SYSTEM_PROMPT = """You are rewriting exam/practice questions for a tutor named Samiu, for his tuition center "Samiu's Tuition". You will be given raw OCR'd or pasted text containing one or more questions (possibly with notes/formulas). Follow these rules exactly:
 
-1. Retype every question in new wording — do not copy the original phrasing verbatim. This should read as a genuinely different sentence with the same meaning and difficulty.
+1. Retype every question in new wording — do not copy the original phrasing verbatim. This should read as a genuinely different sentence with the same meaning and difficulty. EXCEPTION: any text wrapped in single dollar signs like $\\frac{a}{b}$ is a math equation (matplotlib mathtext) — copy it through byte-for-byte, never reword, rewrite, or alter it in any way, even if it looks like it contains a "value" you'd normally vary.
 2. Include ONLY the questions. Strip out any answers, solutions, or worked steps if present in the source.
-3. Lightly vary numeric values in the question (e.g. 25 degrees C becomes 22 degrees C, 100 mL becomes 110 mL) so it isn't identical to the original. NEVER alter universal constants, atomic masses, or balanced chemical equations — those must stay exactly as given.
+3. Lightly vary numeric values in the PLAIN TEXT of the question (e.g. 25 degrees C becomes 22 degrees C, 100 mL becomes 110 mL) so it isn't identical to the original. NEVER alter universal constants, atomic masses, balanced chemical equations, or anything inside a $...$ math expression — those must stay exactly as given.
 4. Do not invent or describe diagrams. If the source relies on a diagram you cannot reproduce with 100% accuracy, describe the setup in clear text instead.
-5. If the source includes a notes/formula/rule section (not itself a question) that would help a student solve the problems, keep it, reworded, as its own slide.
-6. If a question includes a board/university reference like [DU 18-19] or [BUET'22-23], preserve that reference exactly as given.
+5. If the source includes a notes/formula/rule section (not itself a question) that would help a student solve the problems, keep it, reworded, as its own slide (put it in the "question" field like the others).
+6. If a question includes a board/university reference like [DU 18-19] or [BUET'22-23], put that reference in a separate "tag" field, not inside the question text. If there's no reference, use an empty string for "tag".
 
 Return ONLY valid JSON, no other text, in this exact shape:
-{"slides": [{"title": "short label like 'Question 1'", "bullets": ["the reworded question text, can be multiple bullets if it has sub-parts"]}]}
+{"topic_label": "a short Bangla/English label for this topic, e.g. 'ম্যাট্রিক্স'", "slides": [{"question": "the reworded question text", "tag": "[DU 18-19]" or ""}]}
 
 Each distinct question or notes-section becomes one slide."""
 
 
 def rewrite_for_tuition(raw_text: str):
     """
-    Returns a list of {"title":..., "bullets":[...]} slides, rewritten
-    per the tuition rules above, using Google's Gemini API (free-tier
-    friendly). Raises RuntimeError if no API key is configured or the
-    call fails, so the caller can show a clear message rather than
-    silently falling back to unrewritten text (a silent fallback would
-    violate rule 1/2 unnoticed).
+    Returns (topic_label: str, slides: list of {"question": str, "tag": str}),
+    rewritten per the tuition rules above, using Google's Gemini API
+    (free-tier friendly). Raises RuntimeError if no API key is
+    configured or the call fails, so the caller can show a clear
+    message rather than silently falling back to unrewritten text
+    (a silent fallback would violate rule 1/2 unnoticed).
     """
     if not os.environ.get("GEMINI_API_KEY"):
         raise RuntimeError(
@@ -69,4 +69,4 @@ def rewrite_for_tuition(raw_text: str):
     text = resp.text.strip()
     text = re.sub(r"^```json|```$", "", text).strip()
     data = json.loads(text)
-    return data.get("slides", [])
+    return data.get("topic_label", ""), data.get("slides", [])

@@ -16,21 +16,59 @@ watermark instructions.
   roles) and revoke members. A "Public" organization is created
   automatically for the future shared template library.
 - **Guest mode:** no login required to try it, with a real **server-side**
-  rolling usage limit (SQLite-backed, survives server restarts — not the
-  in-memory placeholder from the earlier version).
-- **File input:** paste text, upload up to 20 photos, or both. Each
-  photo becomes its own slide/question. Photos run through Tesseract
-  OCR with `ben+eng` (Bangla + English together, for code-switched
-  content).
-- **Tuition mode (`tuition_rewrite.py`):** a checkbox that runs the
-  content through a real AI call (Claude) which rewrites each question
-  in new wording, strips answers, lightly varies numbers while
-  preserving constants/atomic masses/balanced equations, keeps
-  board/university references, and auto-adds a title page (heading +
-  topic + WhatsApp number) and the "Samiu's Tuition" watermark —
-  encoding the exact rules given for Samiu's Tuition practice slides.
-  **Requires `GEMINI_API_KEY`** set as an environment variable, or
-  it returns a clear error explaining that instead of crashing.
+  rolling usage limit (Postgres-backed, survives server restarts).
+- **Bangla PDF text extraction fix:** many real-world Bangla PDFs
+  (including ones built by embedding a custom font) don't carry a
+  correct Unicode mapping in their text layer — extracting text
+  directly yields garbled control-character soup even though the page
+  displays correctly. Fixed by rendering each PDF page to an image
+  (PyMuPDF) and reading it via the same vision-based extraction as
+  photo uploads, instead of pulling the embedded text layer. Verified
+  against a real affected file — output went from unreadable garbage
+  to clean Bangla text.
+- **Math equation rendering (`math_render.py` + `vision_ocr.py`):**
+  plain OCR (Tesseract) cannot read mathematical notation — fractions,
+  roots, trig functions come out as garbled characters. For photo
+  uploads, the app now tries Gemini's vision understanding first
+  (`vision_ocr.py`) to transcribe the image, marking any equation as
+  a `$...$` mathtext expression; falls back to plain Tesseract OCR if
+  no API key or the vision call fails. Tuition mode's renderer then
+  detects `$...$` segments in the AI-rewritten question text and draws
+  them as properly typeset math images (`math_render.py`, via
+  matplotlib's mathtext — no LaTeX install needed) instead of broken
+  plain text. Tested end-to-end with a real trigonometry identity.
+  plain OCR (Tesseract) cannot read mathematical notation — fractions,
+  roots, trig functions come out as garbled characters. For photo
+  uploads, the app now tries Gemini's vision understanding first
+  (`vision_ocr.py`) to transcribe the image, marking any equation as
+  a `$...$` mathtext expression; falls back to plain Tesseract OCR if
+  no API key or the vision call fails. Tuition mode's renderer then
+  detects `$...$` segments in the AI-rewritten question text and draws
+  them as properly typeset math images (`math_render.py`, via
+  matplotlib's mathtext — no LaTeX install needed) instead of broken
+  plain text. Tested end-to-end with a real trigonometry identity.
+- **File input:** paste text, upload up to 20 photos (click, drag, or
+  paste with Ctrl+V — a proper multi-box picker, not just a plain file
+  input), or both. Each photo becomes its own slide/question.
+- **Persistent database (PostgreSQL):** all accounts, organizations,
+  usage counters, and Train Me uploads (including the actual file
+  bytes, stored directly in the database) now live in a real Postgres
+  database via `DATABASE_URL` — **this survives redeploys.** The app
+  used to use a local SQLite file, which reset every time the server
+  redeployed (Render's free tier has no persistent disk) — that's why
+  accounts and uploads kept disappearing. See "Database setup" below.
+- **Tuition mode (`tuition_rewrite.py` + `render_pptx_tuition` in
+  `renderer.py`):** a checkbox that runs the content through a real AI
+  call (Gemini) which rewrites each question in new wording, strips
+  answers, lightly varies numbers while preserving constants/atomic
+  masses/balanced equations, keeps board/university references (in a
+  separate right-aligned tag line), and renders using Samiu's
+  Tuition's own polished design — dark header bar with topic label +
+  page counter, the diagonal watermark, title slide with WhatsApp
+  contact — ported from a Node/pptxgenjs script the user already had
+  and validated against. **Requires `GEMINI_API_KEY`** set as an
+  environment variable, or it returns a clear error explaining that
+  instead of crashing.
 - **PDF export:** tuition mode always outputs PDF (per the tuition
   rules); the regular flow has a "Generate as PDF instead" button.
   Conversion uses headless LibreOffice (`libreoffice-impress`, now in
@@ -73,6 +111,27 @@ Every piece above was tested end-to-end with Flask's test client
 (signup → generate → org invite/upload → credit awarded → plan switch →
 password reset → re-login → guest limit correctly blocking after 5 uses).
 
+## Database setup (required — do this first)
+
+This app needs a PostgreSQL database. A free one is enough for this
+scale. Two good free options:
+
+1. **Neon** (neon.tech) — sign up, create a project, copy the
+   "Connection string" it gives you (looks like
+   `postgresql://user:password@ep-xxxx.neon.tech/dbname?sslmode=require`).
+2. **Supabase** (supabase.com) — sign up, create a project, go to
+   Project Settings → Database → Connection string (URI format).
+
+Either way, set the connection string as an environment variable
+named `DATABASE_URL` — locally (`export DATABASE_URL=...`) and on
+Render (Environment tab → Add Environment Variable). The app creates
+its own tables automatically on first run (`db.init_db()` is called
+at startup) — no manual schema setup needed.
+
+**Why this matters:** without `DATABASE_URL` set, the app cannot start
+— there is no SQLite fallback anymore, specifically so that data never
+silently lives somewhere non-persistent again.
+
 ## Run it locally
 
 ```bash
@@ -80,6 +139,7 @@ password reset → re-login → guest limit correctly blocking after 5 uses).
 sudo apt-get install tesseract-ocr tesseract-ocr-ben
 
 pip install -r requirements.txt
+export DATABASE_URL=your-postgres-connection-string
 python app.py
 ```
 
@@ -107,10 +167,18 @@ python app.py
 5. **Duplicate-upload detection and the "enough data per category"
    payout phase-out** for Train Me contributions (spec Section 7) —
    currently every valid upload earns credit with no dedup check.
-6. **Production-grade server** — `app.py`'s `debug=True` dev server must
+6. **The remaining training pipeline steps** (spec Section 5) — Train Me
+   now parses .pptx/.pdf uploads and labels each slide's category via
+   AI (`training_pipeline.py`), storing the results in `parsed_slides`.
+   What's still missing: automatic dedup of near-identical uploads,
+   the "enough data per category" reward phase-out, and — once each
+   category has enough labeled examples (~500-1,000, tracked live on
+   the `/org` page) — actually training a small classifier on that
+   data and wiring it into the app as Tier 2.
+7. **Production-grade server** — `app.py`'s `debug=True` dev server must
    be replaced with a real WSGI server (gunicorn/uwsgi) behind a reverse
    proxy before going live.
-7. **Mobile apps** — this is the web app phase; iOS/Android wrapping or
+8. **Mobile apps** — this is the web app phase; iOS/Android wrapping or
    native rebuild comes after the web version is validated.
 
 ## Direction: what to do next

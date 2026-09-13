@@ -1,21 +1,28 @@
 """
-SQLite data layer. Simple and dependency-light on purpose for the MVP —
-swap for Postgres later if/when scale needs it, the schema shape carries over.
+PostgreSQL data layer (persistent — survives redeploys, unlike the
+ephemeral SQLite file this used to be). Requires a DATABASE_URL
+environment variable pointing at a Postgres instance (a free Neon.tech
+or Supabase database both work fine for this scale — see README).
 """
 
-import sqlite3
 import os
 import uuid
 import time
+import psycopg2
+import psycopg2.extras
 from werkzeug.security import generate_password_hash, check_password_hash
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is not set. This app needs a Postgres connection "
+            "string (a free one from neon.tech or supabase.com works) — set "
+            "it as an environment variable. See README for setup steps."
+        )
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 
@@ -23,7 +30,7 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
 
-    c.executescript("""
+    c.execute("""
     CREATE TABLE IF NOT EXISTS organizations (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -38,7 +45,7 @@ def init_db():
         password_hash TEXT NOT NULL,
         display_name TEXT,
         plan TEXT DEFAULT 'free',
-        credits_cents INTEGER DEFAULT 0,   -- in-app credit, non-cash (Section 7 of spec)
+        credits_cents INTEGER DEFAULT 0,
         default_watermark_text TEXT,
         default_watermark_color TEXT,
         default_template TEXT DEFAULT 'classic',
@@ -50,7 +57,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS org_members (
         org_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
-        role TEXT NOT NULL,   -- 'owner' | 'admin' | 'contributor'
+        role TEXT NOT NULL,
         PRIMARY KEY (org_id, user_id),
         FOREIGN KEY (org_id) REFERENCES organizations(id),
         FOREIGN KEY (user_id) REFERENCES users(id)
@@ -66,8 +73,8 @@ def init_db():
     );
 
     CREATE TABLE IF NOT EXISTS usage_tracking (
-        subject_id TEXT PRIMARY KEY,   -- user_id for logged-in, ip/device id for guests
-        subject_type TEXT NOT NULL,    -- 'user' | 'guest'
+        subject_id TEXT PRIMARY KEY,
+        subject_type TEXT NOT NULL,
         window_start INTEGER NOT NULL,
         count INTEGER NOT NULL DEFAULT 0
     );
@@ -77,8 +84,9 @@ def init_db():
         org_id TEXT NOT NULL,
         uploaded_by TEXT NOT NULL,
         filename TEXT NOT NULL,
+        file_data BYTEA,
         rights_confirmed INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'pending',  -- pending | processed
+        status TEXT DEFAULT 'pending',
         created_at INTEGER,
         FOREIGN KEY (org_id) REFERENCES organizations(id),
         FOREIGN KEY (uploaded_by) REFERENCES users(id)
@@ -90,12 +98,28 @@ def init_db():
         created_at INTEGER,
         used INTEGER DEFAULT 0
     );
-    """)
 
-    # Lightweight migration: if an existing users table predates the
-    # default_* columns (e.g. a local app.db from before this update),
-    # add them rather than requiring the user to delete their database.
-    existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+    CREATE TABLE IF NOT EXISTS parsed_slides (
+        id TEXT PRIMARY KEY,
+        upload_id TEXT NOT NULL,
+        org_id TEXT NOT NULL,
+        slide_index INTEGER,
+        raw_text TEXT,
+        bullet_count INTEGER,
+        has_image INTEGER,
+        category TEXT,
+        created_at INTEGER,
+        FOREIGN KEY (upload_id) REFERENCES org_uploads(id),
+        FOREIGN KEY (org_id) REFERENCES organizations(id)
+    );
+    """)
+    conn.commit()
+
+    # Lightweight migration: add columns that might not exist on a
+    # database created before this update, instead of requiring a
+    # manual reset.
+    c.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'users'")
+    existing_cols = {row["column_name"] for row in c.fetchall()}
     for col, ddl in [
         ("default_watermark_text", "ALTER TABLE users ADD COLUMN default_watermark_text TEXT"),
         ("default_watermark_color", "ALTER TABLE users ADD COLUMN default_watermark_color TEXT"),
@@ -105,13 +129,19 @@ def init_db():
     ]:
         if col not in existing_cols:
             c.execute(ddl)
+
+    c.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'org_uploads'")
+    existing_upload_cols = {row["column_name"] for row in c.fetchall()}
+    if "file_data" not in existing_upload_cols:
+        c.execute("ALTER TABLE org_uploads ADD COLUMN file_data BYTEA")
     conn.commit()
 
     # Ensure the "Public" org exists (Section 6 of the spec — shared template library home)
-    existing = c.execute("SELECT id FROM organizations WHERE is_public = 1").fetchone()
+    c.execute("SELECT id FROM organizations WHERE is_public = 1")
+    existing = c.fetchone()
     if not existing:
         c.execute(
-            "INSERT INTO organizations (id, name, is_public, plan, created_at) VALUES (?,?,?,?,?)",
+            "INSERT INTO organizations (id, name, is_public, plan, created_at) VALUES (%s,%s,%s,%s,%s)",
             (str(uuid.uuid4()), "Public", 1, "free", int(time.time())),
         )
 
@@ -121,7 +151,9 @@ def init_db():
 
 def get_public_org_id():
     conn = get_db()
-    row = conn.execute("SELECT id FROM organizations WHERE is_public = 1").fetchone()
+    c = conn.cursor()
+    c.execute("SELECT id FROM organizations WHERE is_public = 1")
+    row = c.fetchone()
     conn.close()
     return row["id"] if row else None
 
@@ -130,26 +162,27 @@ def get_public_org_id():
 
 def create_user(email, password, display_name=None):
     conn = get_db()
+    c = conn.cursor()
     user_id = str(uuid.uuid4())
     try:
-        conn.execute(
+        c.execute(
             "INSERT INTO users (id, email, password_hash, display_name, plan, credits_cents, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
             (user_id, email.lower().strip(), generate_password_hash(password), display_name, "free", 0, int(time.time())),
         )
-        # every user gets their own personal organization (owner role)
         org_id = str(uuid.uuid4())
-        conn.execute(
-            "INSERT INTO organizations (id, name, is_public, plan, created_at) VALUES (?,?,?,?,?)",
+        c.execute(
+            "INSERT INTO organizations (id, name, is_public, plan, created_at) VALUES (%s,%s,%s,%s,%s)",
             (org_id, f"{display_name or email}'s Org", 0, "free", int(time.time())),
         )
-        conn.execute(
-            "INSERT INTO org_members (org_id, user_id, role) VALUES (?,?,?)",
+        c.execute(
+            "INSERT INTO org_members (org_id, user_id, role) VALUES (%s,%s,%s)",
             (org_id, user_id, "owner"),
         )
         conn.commit()
         return user_id
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return None
     finally:
         conn.close()
@@ -157,14 +190,18 @@ def create_user(email, password, display_name=None):
 
 def get_user_by_email(email):
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE email = ?", (email.lower().strip(),)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE email = %s", (email.lower().strip(),))
+    row = c.fetchone()
     conn.close()
     return row
 
 
 def get_user_by_id(user_id):
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+    row = c.fetchone()
     conn.close()
     return row
 
@@ -178,41 +215,39 @@ def verify_password(email, password):
 
 def set_user_plan(user_id, plan):
     conn = get_db()
-    conn.execute("UPDATE users SET plan = ? WHERE id = ?", (plan, user_id))
+    c = conn.cursor()
+    c.execute("UPDATE users SET plan = %s WHERE id = %s", (plan, user_id))
     conn.commit()
     conn.close()
 
 
 def update_user_defaults(user_id, watermark_text=None, watermark_color=None,
                           template=None, tuition_mode=None, whatsapp=None):
-    """
-    Only overwrites fields that were actually provided (non-None) —
-    so submitting a generation without touching, say, the watermark
-    field doesn't erase a previously saved default.
-    """
     fields, values = [], []
     if watermark_text is not None:
-        fields.append("default_watermark_text = ?"); values.append(watermark_text)
+        fields.append("default_watermark_text = %s"); values.append(watermark_text)
     if watermark_color is not None:
-        fields.append("default_watermark_color = ?"); values.append(watermark_color)
+        fields.append("default_watermark_color = %s"); values.append(watermark_color)
     if template is not None:
-        fields.append("default_template = ?"); values.append(template)
+        fields.append("default_template = %s"); values.append(template)
     if tuition_mode is not None:
-        fields.append("default_tuition_mode = ?"); values.append(int(tuition_mode))
+        fields.append("default_tuition_mode = %s"); values.append(int(tuition_mode))
     if whatsapp is not None:
-        fields.append("default_whatsapp = ?"); values.append(whatsapp)
+        fields.append("default_whatsapp = %s"); values.append(whatsapp)
     if not fields:
         return
     values.append(user_id)
     conn = get_db()
-    conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+    c = conn.cursor()
+    c.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = %s", values)
     conn.commit()
     conn.close()
 
 
 def add_user_credit(user_id, cents):
     conn = get_db()
-    conn.execute("UPDATE users SET credits_cents = credits_cents + ? WHERE id = ?", (cents, user_id))
+    c = conn.cursor()
+    c.execute("UPDATE users SET credits_cents = credits_cents + %s WHERE id = %s", (cents, user_id))
     conn.commit()
     conn.close()
 
@@ -221,9 +256,10 @@ def add_user_credit(user_id, cents):
 
 def create_password_reset(user_id):
     conn = get_db()
+    c = conn.cursor()
     token = uuid.uuid4().hex
-    conn.execute(
-        "INSERT INTO password_resets (token, user_id, created_at, used) VALUES (?,?,?,0)",
+    c.execute(
+        "INSERT INTO password_resets (token, user_id, created_at, used) VALUES (%s,%s,%s,0)",
         (token, user_id, int(time.time())),
     )
     conn.commit()
@@ -233,18 +269,17 @@ def create_password_reset(user_id):
 
 def use_password_reset(token, new_password):
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM password_resets WHERE token = ? AND used = 0", (token,)
-    ).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT * FROM password_resets WHERE token = %s AND used = 0", (token,))
+    row = c.fetchone()
     if not row:
         conn.close()
         return False
-    # tokens valid for 1 hour
     if int(time.time()) - row["created_at"] > 3600:
         conn.close()
         return False
-    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(new_password), row["user_id"]))
-    conn.execute("UPDATE password_resets SET used = 1 WHERE token = ?", (token,))
+    c.execute("UPDATE users SET password_hash = %s WHERE id = %s", (generate_password_hash(new_password), row["user_id"]))
+    c.execute("UPDATE password_resets SET used = 1 WHERE token = %s", (token,))
     conn.commit()
     conn.close()
     return True
@@ -254,21 +289,24 @@ def use_password_reset(token, new_password):
 
 def get_user_orgs(user_id):
     conn = get_db()
-    rows = conn.execute(
+    c = conn.cursor()
+    c.execute(
         """SELECT o.*, m.role FROM organizations o
            JOIN org_members m ON o.id = m.org_id
-           WHERE m.user_id = ? AND o.is_public = 0""",
+           WHERE m.user_id = %s AND o.is_public = 0""",
         (user_id,),
-    ).fetchall()
+    )
+    rows = c.fetchall()
     conn.close()
     return rows
 
 
 def create_org_invite(org_id, role="contributor"):
     conn = get_db()
+    c = conn.cursor()
     code = uuid.uuid4().hex[:10]
-    conn.execute(
-        "INSERT INTO org_invites (code, org_id, role, created_at, revoked) VALUES (?,?,?,?,0)",
+    c.execute(
+        "INSERT INTO org_invites (code, org_id, role, created_at, revoked) VALUES (%s,%s,%s,%s,0)",
         (code, org_id, role, int(time.time())),
     )
     conn.commit()
@@ -278,12 +316,15 @@ def create_org_invite(org_id, role="contributor"):
 
 def redeem_invite(code, user_id):
     conn = get_db()
-    row = conn.execute("SELECT * FROM org_invites WHERE code = ? AND revoked = 0", (code,)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT * FROM org_invites WHERE code = %s AND revoked = 0", (code,))
+    row = c.fetchone()
     if not row:
         conn.close()
         return None
-    conn.execute(
-        "INSERT OR REPLACE INTO org_members (org_id, user_id, role) VALUES (?,?,?)",
+    c.execute(
+        """INSERT INTO org_members (org_id, user_id, role) VALUES (%s,%s,%s)
+           ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role""",
         (row["org_id"], user_id, row["role"]),
     )
     conn.commit()
@@ -294,30 +335,41 @@ def redeem_invite(code, user_id):
 
 def revoke_member(org_id, user_id):
     conn = get_db()
-    conn.execute("DELETE FROM org_members WHERE org_id = ? AND user_id = ?", (org_id, user_id))
+    c = conn.cursor()
+    c.execute("DELETE FROM org_members WHERE org_id = %s AND user_id = %s", (org_id, user_id))
     conn.commit()
     conn.close()
 
 
 def get_org_members(org_id):
     conn = get_db()
-    rows = conn.execute(
+    c = conn.cursor()
+    c.execute(
         """SELECT u.id, u.email, u.display_name, m.role FROM users u
            JOIN org_members m ON u.id = m.user_id
-           WHERE m.org_id = ?""",
+           WHERE m.org_id = %s""",
         (org_id,),
-    ).fetchall()
+    )
+    rows = c.fetchall()
     conn.close()
     return rows
 
 
-def add_org_upload(org_id, uploaded_by, filename, rights_confirmed):
+def add_org_upload(org_id, uploaded_by, filename, rights_confirmed, file_data=None):
+    """
+    file_data: raw bytes of the uploaded file, stored directly in the
+    database so it survives redeploys (no separate object storage
+    needed at this scale).
+    """
     conn = get_db()
+    c = conn.cursor()
     upload_id = str(uuid.uuid4())
-    conn.execute(
-        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, rights_confirmed, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (upload_id, org_id, uploaded_by, filename, int(rights_confirmed), "pending", int(time.time())),
+    c.execute(
+        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, file_data, rights_confirmed, status, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (upload_id, org_id, uploaded_by, filename,
+         psycopg2.Binary(file_data) if file_data else None,
+         int(rights_confirmed), "pending", int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -326,9 +378,66 @@ def add_org_upload(org_id, uploaded_by, filename, rights_confirmed):
 
 def get_org_uploads(org_id):
     conn = get_db()
-    rows = conn.execute("SELECT * FROM org_uploads WHERE org_id = ? ORDER BY created_at DESC", (org_id,)).fetchall()
+    c = conn.cursor()
+    # file_data excluded here deliberately — it can be large, and this
+    # is only used to render the upload-history list.
+    c.execute(
+        "SELECT id, org_id, uploaded_by, filename, rights_confirmed, status, created_at "
+        "FROM org_uploads WHERE org_id = %s ORDER BY created_at DESC",
+        (org_id,),
+    )
+    rows = c.fetchall()
     conn.close()
     return rows
+
+
+def get_org_upload_file(upload_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT filename, file_data FROM org_uploads WHERE id = %s", (upload_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def set_upload_status(upload_id, status):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE org_uploads SET status = %s WHERE id = %s", (status, upload_id))
+    conn.commit()
+    conn.close()
+
+
+def save_parsed_slides(upload_id, org_id, slides):
+    """slides: list of {"raw_text","bullet_count","has_image","category"}"""
+    conn = get_db()
+    c = conn.cursor()
+    now = int(time.time())
+    for i, s in enumerate(slides):
+        c.execute(
+            "INSERT INTO parsed_slides (id, upload_id, org_id, slide_index, raw_text, bullet_count, has_image, category, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (str(uuid.uuid4()), upload_id, org_id, i, s["raw_text"], s["bullet_count"], int(s["has_image"]), s["category"], now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_category_counts(org_id=None):
+    """
+    Counts labeled slides per category — this is exactly the number
+    the spec's Section 12 threshold (~500-1000 per category) tracks
+    against, to know when there's "enough" data for a category.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    if org_id:
+        c.execute("SELECT category, COUNT(*) as n FROM parsed_slides WHERE org_id = %s GROUP BY category", (org_id,))
+    else:
+        c.execute("SELECT category, COUNT(*) as n FROM parsed_slides GROUP BY category")
+    rows = c.fetchall()
+    conn.close()
+    return {r["category"]: r["n"] for r in rows}
 
 
 # ---------- Usage / rolling-window limiter (Section 8 of the spec) ----------
@@ -336,8 +445,8 @@ def get_org_uploads(org_id):
 # Two separate limits, because they protect different things:
 #   - General generation (rule engine only) costs nothing to run, so its
 #     limit only exists to stop abuse/server load — it can be generous.
-#   - AI-powered generation (tuition mode, real Claude API calls) costs
-#     real money per use, so it needs its own, much tighter budget-based
+#   - AI-powered generation (tuition mode, real Gemini API calls) costs
+#     real quota per use, so it needs its own, much tighter budget-based
 #     limit, tracked separately and on a longer (daily) window.
 
 PLAN_LIMITS = {
@@ -361,11 +470,13 @@ def _check_and_increment(subject_id, plan, limits, window_seconds, subject_type=
     limit = limits.get(plan, limits["free"])
     now = int(time.time())
     conn = get_db()
-    row = conn.execute("SELECT * FROM usage_tracking WHERE subject_id = ?", (subject_id,)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT * FROM usage_tracking WHERE subject_id = %s", (subject_id,))
+    row = c.fetchone()
 
     if row is None:
-        conn.execute(
-            "INSERT INTO usage_tracking (subject_id, subject_type, window_start, count) VALUES (?,?,?,1)",
+        c.execute(
+            "INSERT INTO usage_tracking (subject_id, subject_type, window_start, count) VALUES (%s,%s,%s,1)",
             (subject_id, subject_type, now),
         )
         conn.commit()
@@ -374,8 +485,8 @@ def _check_and_increment(subject_id, plan, limits, window_seconds, subject_type=
 
     elapsed = now - row["window_start"]
     if elapsed >= window_seconds:
-        conn.execute(
-            "UPDATE usage_tracking SET window_start = ?, count = 1 WHERE subject_id = ?",
+        c.execute(
+            "UPDATE usage_tracking SET window_start = %s, count = 1 WHERE subject_id = %s",
             (now, subject_id),
         )
         conn.commit()
@@ -386,7 +497,7 @@ def _check_and_increment(subject_id, plan, limits, window_seconds, subject_type=
         conn.close()
         return False, 0, window_seconds - elapsed
 
-    conn.execute("UPDATE usage_tracking SET count = count + 1 WHERE subject_id = ?", (subject_id,))
+    c.execute("UPDATE usage_tracking SET count = count + 1 WHERE subject_id = %s", (subject_id,))
     conn.commit()
     conn.close()
     return True, limit - row["count"] - 1, window_seconds - elapsed

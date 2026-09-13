@@ -22,10 +22,12 @@ from flask import Flask, request, render_template, send_file, redirect, url_for,
 
 import db
 from engine import parse_content_to_slides, apply_watermark_instruction, TEMPLATES
-from renderer import render_pptx, convert_pptx_to_pdf
+from renderer import render_pptx, render_pptx_tuition, convert_pptx_to_pdf
 from ocr import extract_text_from_image
+from vision_ocr import extract_content_from_image
 from instruction_parser import parse_instruction
 from tuition_rewrite import rewrite_for_tuition
+from training_pipeline import process_upload
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("slideapp")
@@ -186,12 +188,21 @@ def _generate_impl():
     for photo in uploaded_photos:
         if not photo or not photo.filename:
             continue
+        photo_bytes = photo.read()
         photo_path = os.path.join(UPLOAD_DIR, f"{int(time.time())}_{photo.filename}")
-        photo.save(photo_path)
+        with open(photo_path, "wb") as fh:
+            fh.write(photo_bytes)
         try:
-            ocr_text = extract_text_from_image(photo_path)
+            # Try Gemini vision first — it can actually read equations
+            # (fractions, roots, trig) correctly, unlike plain OCR,
+            # which garbles them into meaningless characters. Falls
+            # back to Tesseract if no API key or the vision call fails.
+            mime = photo.mimetype or "image/png"
+            ocr_text = extract_content_from_image(photo_bytes, mime_type=mime)
+            if ocr_text is None:
+                ocr_text = extract_text_from_image(photo_path)
         except Exception as exc:
-            raise RuntimeError(f"OCR failed on '{photo.filename}': {exc}")
+            raise RuntimeError(f"Reading '{photo.filename}' failed: {exc}")
         if ocr_text:
             ocr_blocks.append(ocr_text)
 
@@ -238,21 +249,24 @@ def _generate_impl():
         parsed = parse_instruction(watermark_instruction)
         watermark = apply_watermark_instruction(parsed)
 
-    title_page = None
+    base_name = f"{int(time.time())}_{(user['id'] if user else 'guest')}"
+    pptx_path = os.path.join(GENERATED_DIR, f"{base_name}.pptx")
 
     if tuition_mode:
         # AI rewrite per Samiu's Tuition rules — raises a clear
         # RuntimeError (shown to the user) if no API key is configured.
-        slides = rewrite_for_tuition(text_content)
-        if not watermark:
-            watermark = apply_watermark_instruction({"text": "Samiu's Tuition"})
-        title_page = {
-            "heading": "Samiu's Tuition",
-            "subtitle": tuition_topic,
-            "contact": f"WhatsApp: {whatsapp}" if whatsapp else "",
-        }
+        topic_label, tuition_slides = rewrite_for_tuition(text_content)
+        render_pptx_tuition(
+            tuition_slides,
+            topic_label=topic_label or tuition_topic or "Practice Questions",
+            title=tuition_topic or topic_label or "Practice Questions",
+            subtitle=topic_label if tuition_topic else "",
+            whatsapp=whatsapp,
+            out_path=pptx_path,
+        )
     else:
         slides = parse_content_to_slides(text_content)
+        render_pptx(slides, template, watermark=watermark, out_path=pptx_path)
 
     # Save whatever the user actually entered this time as their new
     # default, so they don't have to retype it next visit. Only
@@ -267,11 +281,6 @@ def _generate_impl():
             whatsapp=(request.form.get("whatsapp", "").strip() or None),
         )
 
-    base_name = f"{int(time.time())}_{(user['id'] if user else 'guest')}"
-    pptx_path = os.path.join(GENERATED_DIR, f"{base_name}.pptx")
-    render_pptx(slides, template, watermark=watermark, out_path=pptx_path, title_page=title_page)
-
-
     want_pdf = request.form.get("format") == "pdf" or tuition_mode
     if want_pdf:
         try:
@@ -283,6 +292,9 @@ def _generate_impl():
     return send_file(pptx_path, as_attachment=True, download_name="presentation.pptx")
 
 
+CATEGORY_TARGET = 500  # Section 12 threshold — "enough" data per category
+
+
 @app.route("/org")
 @login_required
 def org_dashboard():
@@ -291,7 +303,25 @@ def org_dashboard():
     org = orgs[0] if orgs else None
     members = db.get_org_members(org["id"]) if org else []
     uploads = db.get_org_uploads(org["id"]) if org else []
-    return render_template("org.html", org=org, members=members, uploads=uploads)
+    category_counts = db.get_category_counts(org["id"]) if org else {}
+
+    progress = []
+    for cat, n in sorted(category_counts.items(), key=lambda x: -x[1]):
+        pct = min(100, round((n / CATEGORY_TARGET) * 100, 1))
+        remaining = max(0, CATEGORY_TARGET - n)
+        progress.append({"category": cat, "count": n, "pct": pct, "remaining": remaining})
+
+    total_slides = sum(category_counts.values())
+    processed_count = len([u for u in uploads if u["status"] == "processed"])
+    pending_count = len([u for u in uploads if u["status"] == "pending"])
+    failed_count = len([u for u in uploads if u["status"] not in ("processed", "pending")])
+
+    return render_template(
+        "org.html", org=org, members=members, uploads=uploads,
+        progress=progress, total_slides=total_slides,
+        processed_count=processed_count, pending_count=pending_count, failed_count=failed_count,
+        category_target=CATEGORY_TARGET,
+    )
 
 
 @app.route("/org/invite", methods=["POST"])
@@ -346,11 +376,28 @@ def org_upload():
     if not rights_confirmed:
         flash("You must confirm you have rights to upload this file.")
         return redirect(url_for("org_dashboard"))
-    save_path = os.path.join(ORG_UPLOAD_DIR, f"{org['id']}_{int(time.time())}_{f.filename}")
-    f.save(save_path)
-    db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True)
-    flash("Uploaded — thanks for contributing to training data!")
+    file_bytes = f.read()
+    upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True, file_data=file_bytes)
     db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
+
+    # Run the parsing + AI-labeling pipeline right away (Section 5 of
+    # the spec) — this is what actually turns the upload into training
+    # data, instead of it just sitting as a stored file.
+    try:
+        status, parsed_slides = process_upload(f.filename, file_bytes)
+        if status == "processed" and parsed_slides:
+            db.save_parsed_slides(upload_id, org["id"], parsed_slides)
+        db.set_upload_status(upload_id, status)
+        if status == "processed":
+            flash(f"Uploaded and processed — {len(parsed_slides)} slides parsed and labeled for training.")
+        elif status == "unsupported_format":
+            flash("Uploaded and credited, but this file type isn't parseable yet (only .pptx and .pdf are supported for training data extraction).")
+        else:
+            flash("Uploaded and credited, but parsing this file failed — it's stored, but not yet usable as training data.")
+    except Exception as exc:
+        logger.error("Train Me processing failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
+        flash("Uploaded and credited, but processing hit an error (logged for review).")
+
     return redirect(url_for("org_dashboard"))
 
 
