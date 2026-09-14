@@ -146,6 +146,31 @@ def index():
     return render_template("index.html", templates=TEMPLATES, remaining=remaining, defaults=defaults)
 
 
+def _resize_image_bytes(image_bytes: bytes, max_dimension: int = 1800) -> bytes:
+    """
+    Downscales an image so its longest edge is at most max_dimension
+    px, re-encoding as JPEG. Phone camera photos are often 3000-4000px
+    on the long edge and several MB — processing them at full
+    resolution (OCR, vision upload, in-memory buffers) is what pushed
+    this service over Render's 512MB free-tier RAM limit. OCR/vision
+    accuracy doesn't need more than ~1800px for typical text/exam
+    photos, so this trades a little theoretical sharpness for a much
+    smaller memory footprint.
+    """
+    from PIL import Image
+    from io import BytesIO
+
+    img = Image.open(BytesIO(image_bytes))
+    img = img.convert("RGB")
+    if max(img.size) > max_dimension:
+        ratio = max_dimension / max(img.size)
+        new_size = (int(img.width * ratio), int(img.height * ratio))
+        img = img.resize(new_size, Image.LANCZOS)
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=82)
+    return out.getvalue()
+
+
 MAX_PHOTOS = 20
 MAX_TRAIN_UPLOADS = 20  # per batch, to keep each request's processing time reasonable
 REPROCESS_BATCH_SIZE = 5  # smaller than upload batch — reprocess handles files that may be large PDFs, kept small to stay well under the request timeout even on a slow connection
@@ -191,6 +216,10 @@ def _generate_impl():
         if not photo or not photo.filename:
             continue
         photo_bytes = photo.read()
+        try:
+            photo_bytes = _resize_image_bytes(photo_bytes)
+        except Exception:
+            pass  # if resizing fails for any reason, fall back to the original bytes
         photo_path = os.path.join(UPLOAD_DIR, f"{int(time.time())}_{photo.filename}")
         with open(photo_path, "wb") as fh:
             fh.write(photo_bytes)
@@ -199,7 +228,7 @@ def _generate_impl():
             # (fractions, roots, trig) correctly, unlike plain OCR,
             # which garbles them into meaningless characters. Falls
             # back to Tesseract if no API key or the vision call fails.
-            mime = photo.mimetype or "image/png"
+            mime = "image/jpeg"
             ocr_text = extract_content_from_image(photo_bytes, mime_type=mime)
             if ocr_text is None:
                 ocr_text = extract_text_from_image(photo_path)

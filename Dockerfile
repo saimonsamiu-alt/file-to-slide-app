@@ -17,4 +17,4 @@ RUN mkdir -p generated uploads org_uploads
 ENV PORT=5000
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "300", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "2", "--timeout", "300", "--max-requests", "50", "--max-requests-jitter", "10", "app:app"]

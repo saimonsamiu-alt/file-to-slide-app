@@ -17,6 +17,20 @@ watermark instructions.
   automatically for the future shared template library.
 - **Guest mode:** no login required to try it, with a real **server-side**
   rolling usage limit (Postgres-backed, survives server restarts).
+- **R2 file storage (`storage_r2.py`):** Train Me uploads now go to
+  Cloudflare R2 (S3-compatible, 10GB free, no egress fees) when
+  configured, instead of Postgres — Neon's free tier is only 0.5GB,
+  which fills up fast storing files as bytea. Falls back to storing
+  in Postgres automatically if R2 env vars aren't set, so this is
+  safe to deploy either way. See "R2 setup" below.
+- **Memory-crash fixes:** the service was hitting Render's 512MB
+  free-tier RAM limit and getting force-restarted (which shows up as
+  a 502 to the browser). Fixed by: resizing uploaded photos to a
+  reasonable max dimension before OCR/vision (phone photos are often
+  3000px+ and several MB), lowering PDF page-render resolution,
+  releasing PyMuPDF page memory promptly, and reducing gunicorn to a
+  single worker with periodic recycling (`--max-requests`) instead of
+  2 workers that could together exceed the RAM limit under load.
 - **Bangla PDF text extraction fix:** many real-world Bangla PDFs
   (including ones built by embedding a custom font) don't carry a
   correct Unicode mapping in their text layer — extracting text
@@ -110,6 +124,27 @@ watermark instructions.
 Every piece above was tested end-to-end with Flask's test client
 (signup → generate → org invite/upload → credit awarded → plan switch →
 password reset → re-login → guest limit correctly blocking after 5 uses).
+
+## R2 setup (optional but recommended)
+
+Without this, uploaded training files are stored directly in Postgres
+(works fine at small scale, but Neon's free tier is only 0.5GB total).
+To use Cloudflare R2 instead (10GB free, no egress fees):
+
+1. Sign up at cloudflare.com, go to R2 in the dashboard, create a bucket
+   (any name, e.g. `slideapp-uploads`).
+2. Create an R2 API token (R2 → Manage API Tokens → Create API Token)
+   with read/write access to that bucket. Note the Account ID, Access
+   Key ID, and Secret Access Key it gives you.
+3. Set these environment variables (locally and on Render):
+   - `R2_ACCOUNT_ID`
+   - `R2_ACCESS_KEY_ID`
+   - `R2_SECRET_ACCESS_KEY`
+   - `R2_BUCKET_NAME` (the bucket name from step 1)
+
+The app detects these automatically — no code change needed. Existing
+files already stored in Postgres stay there and still work; only new
+uploads after this is configured go to R2.
 
 ## Database setup (required — do this first)
 

@@ -85,6 +85,7 @@ def init_db():
         uploaded_by TEXT NOT NULL,
         filename TEXT NOT NULL,
         file_data BYTEA,
+        storage_key TEXT,
         content_hash TEXT,
         rights_confirmed INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
@@ -137,6 +138,8 @@ def init_db():
         c.execute("ALTER TABLE org_uploads ADD COLUMN file_data BYTEA")
     if "content_hash" not in existing_upload_cols:
         c.execute("ALTER TABLE org_uploads ADD COLUMN content_hash TEXT")
+    if "storage_key" not in existing_upload_cols:
+        c.execute("ALTER TABLE org_uploads ADD COLUMN storage_key TEXT")
     conn.commit()
 
     # Ensure the "Public" org exists (Section 6 of the spec — shared template library home)
@@ -360,22 +363,38 @@ def get_org_members(org_id):
 
 def add_org_upload(org_id, uploaded_by, filename, rights_confirmed, file_data=None, content_hash=None):
     """
-    file_data: raw bytes of the uploaded file, stored directly in the
-    database so it survives redeploys (no separate object storage
-    needed at this scale).
+    file_data: raw bytes of the uploaded file. If R2 is configured
+    (storage_r2.is_configured()), the bytes are uploaded to R2 and
+    only a storage_key reference is kept in Postgres — this keeps the
+    database small (Neon's free tier is only 0.5GB) and avoids R2
+    egress fees since files are read back by this same server.
+    Falls back to storing bytes directly in Postgres if R2 isn't set
+    up, so this works either way.
     content_hash: sha256 hex digest of file_data — used for duplicate
     detection (find_upload_by_hash) so the same file re-uploaded
     doesn't get credited/processed twice.
     """
+    import storage_r2
+
+    upload_id = str(uuid.uuid4())
+    storage_key = None
+    db_file_data = None
+
+    if file_data:
+        if storage_r2.is_configured():
+            storage_key = f"org_uploads/{org_id}/{upload_id}_{filename}"
+            storage_r2.upload_bytes(storage_key, file_data)
+        else:
+            db_file_data = file_data
+
     conn = get_db()
     c = conn.cursor()
-    upload_id = str(uuid.uuid4())
     c.execute(
-        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, file_data, content_hash, rights_confirmed, status, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "INSERT INTO org_uploads (id, org_id, uploaded_by, filename, file_data, storage_key, content_hash, rights_confirmed, status, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (upload_id, org_id, uploaded_by, filename,
-         psycopg2.Binary(file_data) if file_data else None,
-         content_hash,
+         psycopg2.Binary(db_file_data) if db_file_data else None,
+         storage_key, content_hash,
          int(rights_confirmed), "pending", int(time.time())),
     )
     conn.commit()
@@ -413,12 +432,25 @@ def get_org_uploads(org_id):
 
 
 def get_org_upload_file(upload_id):
+    """
+    Returns {"filename": ..., "file_data": <bytes>} — fetched from R2
+    if storage_key is set, otherwise from the legacy Postgres bytea
+    column. Either way the caller gets plain bytes back, transparently.
+    """
+    import storage_r2
+
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT filename, file_data FROM org_uploads WHERE id = %s", (upload_id,))
+    c.execute("SELECT filename, file_data, storage_key FROM org_uploads WHERE id = %s", (upload_id,))
     row = c.fetchone()
     conn.close()
-    return row
+    if not row:
+        return None
+    if row["storage_key"]:
+        data = storage_r2.download_bytes(row["storage_key"])
+    else:
+        data = bytes(row["file_data"]) if row["file_data"] else None
+    return {"filename": row["filename"], "file_data": data}
 
 
 def set_upload_status(upload_id, status):

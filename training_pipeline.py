@@ -63,7 +63,10 @@ def parse_pdf(file_bytes):
     slides_data = []
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     for page in doc:
-        pix = page.get_pixmap(dpi=150)
+        # 100 dpi (not 150) — cuts memory per page substantially; plenty
+        # of resolution for OCR/vision on typical exam/notes text, and
+        # this service runs under a tight 512MB RAM limit.
+        pix = page.get_pixmap(dpi=100)
         img_bytes = pix.tobytes("png")
 
         text = extract_content_from_image(img_bytes, mime_type="image/png")
@@ -80,6 +83,7 @@ def parse_pdf(file_bytes):
             "bullet_count": bullet_count,
             "has_image": has_image,
         })
+        pix = None  # release native pixmap memory promptly, don't wait for GC
     doc.close()
     return slides_data
 
