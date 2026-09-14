@@ -364,6 +364,15 @@ def org_revoke():
 @app.route("/org/upload", methods=["POST"])
 @login_required
 def org_upload():
+    try:
+        return _org_upload_impl()
+    except Exception as exc:
+        logger.error("org_upload() failed: %s\n%s", exc, traceback.format_exc())
+        flash(f"Something went wrong during upload: {exc}. (Full details were logged server-side.)")
+        return redirect(url_for("org_dashboard"))
+
+
+def _org_upload_impl():
     user = current_user()
     orgs = db.get_user_orgs(user["id"])
     if not orgs:
@@ -384,23 +393,23 @@ def org_upload():
     processed_n, duplicate_n, failed_n, unsupported_n = 0, 0, 0, 0
 
     for f in files[:MAX_TRAIN_UPLOADS]:
-        file_bytes = f.read()
-        content_hash = hashlib.sha256(file_bytes).hexdigest()
-
-        existing = db.find_upload_by_hash(org["id"], content_hash)
-        if existing:
-            duplicate_n += 1
-            continue  # identical file already uploaded — no credit, no reprocessing
-
-        upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True,
-                                       file_data=file_bytes, content_hash=content_hash)
-        db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
-
-        # Run the parsing + AI-labeling pipeline right away (Section 5
-        # of the spec). The status is ALWAYS set to something terminal
-        # here — even on a hard failure — so uploads never get stuck
-        # showing "pending" forever with no explanation.
+        # Every file is handled independently — one file's DB error or
+        # processing crash must never abort the rest of the batch, and
+        # must never bubble up as a raw "Internal Server Error" page.
+        upload_id = None
         try:
+            file_bytes = f.read()
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+
+            existing = db.find_upload_by_hash(org["id"], content_hash)
+            if existing:
+                duplicate_n += 1
+                continue  # identical file already uploaded — no credit, no reprocessing
+
+            upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True,
+                                           file_data=file_bytes, content_hash=content_hash)
+            db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
+
             status, parsed_slides = process_upload(f.filename, file_bytes)
             if status == "processed" and parsed_slides:
                 db.save_parsed_slides(upload_id, org["id"], parsed_slides)
@@ -412,8 +421,12 @@ def org_upload():
             else:
                 failed_n += 1
         except Exception as exc:
-            logger.error("Train Me processing failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
-            db.set_upload_status(upload_id, "failed")
+            logger.error("Train Me upload failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
+            if upload_id:
+                try:
+                    db.set_upload_status(upload_id, "failed")
+                except Exception:
+                    pass
             failed_n += 1
 
     parts = []
@@ -433,6 +446,15 @@ def org_upload():
 @app.route("/org/reprocess", methods=["POST"])
 @login_required
 def org_reprocess():
+    try:
+        return _org_reprocess_impl()
+    except Exception as exc:
+        logger.error("org_reprocess() failed: %s\n%s", exc, traceback.format_exc())
+        flash(f"Something went wrong while reprocessing: {exc}. (Full details were logged server-side.)")
+        return redirect(url_for("org_dashboard"))
+
+
+def _org_reprocess_impl():
     """
     Retries any uploads stuck at 'pending' (e.g. ones uploaded before
     a bug fix, or that hit a transient error) without needing to
@@ -465,6 +487,29 @@ def org_reprocess():
 
     flash(f"Reprocessed {retried} stuck upload(s) — {fixed} now processed successfully.")
     return redirect(url_for("org_dashboard"))
+
+
+@app.route("/org/diagnostics")
+@login_required
+def org_diagnostics():
+    """
+    Free-plan-friendly substitute for checking environment variables
+    via Render's Shell (which needs a paid plan). Never reveals actual
+    key values — only whether each is present and roughly how long it
+    is, enough to catch "not set" or "pasted with extra whitespace".
+    """
+    def describe(name):
+        val = os.environ.get(name)
+        if not val:
+            return "NOT SET"
+        return f"set ({len(val)} characters, starts with '{val[:4]}...')"
+
+    lines = [
+        f"GEMINI_API_KEY: {describe('GEMINI_API_KEY')}",
+        f"DATABASE_URL: {describe('DATABASE_URL')}",
+        f"SECRET_KEY: {describe('SECRET_KEY')}",
+    ]
+    return "<pre>" + "\n".join(lines) + "</pre>"
 
 
 @app.route("/upgrade", methods=["GET", "POST"])
