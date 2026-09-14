@@ -55,6 +55,7 @@ def _ai_parse(instruction: str) -> dict:
     """Optional real AI parse — only runs if a Gemini API key is configured."""
     from google import genai
     from google.genai import types
+    import gemini_client
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     prompt = (
@@ -64,8 +65,8 @@ def _ai_parse(instruction: str) -> dict:
         "Return ONLY the JSON, nothing else.\n\n"
         f"Instruction: {instruction}"
     )
-    resp = client.models.generate_content(
-        model="gemini-2.0-flash",
+    resp = gemini_client.generate_content(
+        client,
         contents=prompt,
         config=types.GenerateContentConfig(response_mime_type="application/json"),
     )

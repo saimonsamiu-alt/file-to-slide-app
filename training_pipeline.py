@@ -104,6 +104,7 @@ def label_slide(raw_text, bullet_count, has_image):
     if os.environ.get("GEMINI_API_KEY"):
         try:
             from google import genai
+            import gemini_client
 
             client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
             prompt = (
@@ -112,7 +113,7 @@ def label_slide(raw_text, bullet_count, has_image):
                 "Return ONLY the category word, nothing else.\n\n"
                 f"Text: {raw_text[:500]}\nBullet count: {bullet_count}\nHas image: {has_image}"
             )
-            resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            resp = gemini_client.generate_content(client, contents=prompt)
             label = resp.text.strip().lower().split()[0] if resp.text.strip() else ""
             valid = {"title", "bullet-list", "image-heavy", "comparison", "notes-formula", "other"}
             if label in valid:

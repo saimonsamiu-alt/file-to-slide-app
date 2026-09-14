@@ -56,10 +56,11 @@ def rewrite_for_tuition(raw_text: str):
 
     from google import genai
     from google.genai import types
+    import gemini_client
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    resp = client.models.generate_content(
-        model="gemini-2.0-flash",
+    resp = gemini_client.generate_content(
+        client,
         contents=raw_text,
         config=types.GenerateContentConfig(
             system_instruction=TUITION_SYSTEM_PROMPT,

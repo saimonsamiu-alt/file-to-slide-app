@@ -148,6 +148,7 @@ def index():
 
 MAX_PHOTOS = 20
 MAX_TRAIN_UPLOADS = 20  # per batch, to keep each request's processing time reasonable
+REPROCESS_BATCH_SIZE = 5  # smaller than upload batch — reprocess handles files that may be large PDFs, kept small to stay well under the request timeout even on a slow connection
 
 
 @app.route("/generate", methods=["POST"])
@@ -468,7 +469,7 @@ def _org_reprocess_impl():
     stuck = [u for u in db.get_org_uploads(org["id"]) if u["status"] == "pending"]
 
     retried, fixed = 0, 0
-    for u in stuck[:MAX_TRAIN_UPLOADS]:
+    for u in stuck[:REPROCESS_BATCH_SIZE]:
         row = db.get_org_upload_file(u["id"])
         if not row or not row["file_data"]:
             db.set_upload_status(u["id"], "failed")
@@ -485,7 +486,11 @@ def _org_reprocess_impl():
             logger.error("Reprocess failed for %s: %s\n%s", row["filename"], exc, traceback.format_exc())
             db.set_upload_status(u["id"], "failed")
 
-    flash(f"Reprocessed {retried} stuck upload(s) — {fixed} now processed successfully.")
+    remaining_after = max(0, len(stuck) - retried)
+    msg = f"Reprocessed {retried} stuck upload(s) — {fixed} now processed successfully."
+    if remaining_after:
+        msg += f" {remaining_after} more still pending — click the button again to continue (done in small batches to avoid timeouts)."
+    flash(msg)
     return redirect(url_for("org_dashboard"))
 
 

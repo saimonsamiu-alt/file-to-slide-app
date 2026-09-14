@@ -94,7 +94,8 @@
     {% set pending_exists = uploads | selectattr('status', 'equalto', 'pending') | list %}
     {% if pending_exists %}
       <form method="post" action="{{ url_for('org_reprocess') }}" style="margin-bottom:10px;">
-        <button type="submit" class="btn-ghost" style="width:auto; padding:8px 16px;">Reprocess stuck "pending" uploads ({{ pending_exists | length }})</button>
+        <button type="submit" class="btn-ghost" style="width:auto; padding:8px 16px;">Reprocess stuck "pending" uploads ({{ pending_exists | length }}) — does 5 at a time</button>
+        <p class="hint" style="margin-top:6px;">Click repeatedly if there are more than 5 — done in small batches so it never times out.</p>
       </form>
     {% endif %}
     <table>

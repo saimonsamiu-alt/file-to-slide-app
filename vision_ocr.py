@@ -49,8 +49,9 @@ def extract_content_from_image(image_bytes: bytes, mime_type: str = "image/png")
         from google.genai import types
 
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        resp = client.models.generate_content(
-            model="gemini-2.0-flash",
+        import gemini_client
+        resp = gemini_client.generate_content(
+            client,
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 VISION_PROMPT,
