@@ -13,6 +13,14 @@ from pptx.enum.shapes import MSO_SHAPE
 from math_render import render_math_to_png_bytes
 import re
 
+# Any text that might contain Bangla script MUST use this font. Default
+# PowerPoint/LibreOffice fonts (Calibri, Georgia, etc.) have no Bangla
+# glyphs — when LibreOffice converts such a .pptx to PDF, the missing
+# glyphs get corrupted/substituted, producing garbled output (this was
+# a real bug: PDFs were coming out as repeated nonsense characters).
+# "Noto Sans Bengali" is installed system-wide via the Dockerfile.
+BANGLA_FONT = "Noto Sans Bengali"
+
 
 def _hex_to_rgb(hex_color: str) -> RGBColor:
     hex_color = hex_color.strip().lstrip("#")
@@ -26,7 +34,7 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
     "contact": "WhatsApp: 01577477346"} — rendered as slide 0 when provided.
     """
     prs = Presentation()
-    blank_layout = prs.slide_layouts[6]  # fully blank layout, we control everything
+    blank_layout = prs.slide_layouts[6]
 
     bg_rgb = _hex_to_rgb(template["bg_color"])
     title_rgb = _hex_to_rgb(template["title_color"])
@@ -41,6 +49,7 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
         h_tf.text = title_page.get("heading", "")
         h_tf.paragraphs[0].font.size = Pt(40)
         h_tf.paragraphs[0].font.bold = True
+        h_tf.paragraphs[0].font.name = BANGLA_FONT
         h_tf.paragraphs[0].font.color.rgb = title_rgb
         h_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
         if title_page.get("subtitle"):
@@ -48,6 +57,7 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
             s_tf = s_box.text_frame
             s_tf.text = title_page["subtitle"]
             s_tf.paragraphs[0].font.size = Pt(22)
+            s_tf.paragraphs[0].font.name = BANGLA_FONT
             s_tf.paragraphs[0].font.color.rgb = bullet_rgb
             s_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
         if title_page.get("contact"):
@@ -55,26 +65,24 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
             c_tf = c_box.text_frame
             c_tf.text = title_page["contact"]
             c_tf.paragraphs[0].font.size = Pt(16)
+            c_tf.paragraphs[0].font.name = BANGLA_FONT
             c_tf.paragraphs[0].font.color.rgb = bullet_rgb
             c_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
 
     for slide_data in slides:
         slide = prs.slides.add_slide(blank_layout)
-
-        # background
         bg = slide.background
         bg.fill.solid()
         bg.fill.fore_color.rgb = bg_rgb
 
-        # title box
         title_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(9), Inches(1))
         tf = title_box.text_frame
         tf.text = slide_data["title"]
         tf.paragraphs[0].font.size = Pt(32)
         tf.paragraphs[0].font.bold = True
+        tf.paragraphs[0].font.name = BANGLA_FONT
         tf.paragraphs[0].font.color.rgb = title_rgb
 
-        # bullets box
         if slide_data["bullets"]:
             body_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(8.5), Inches(5))
             btf = body_box.text_frame
@@ -83,10 +91,10 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
                 p = btf.paragraphs[0] if i == 0 else btf.add_paragraph()
                 p.text = f"\u2022 {bullet}"
                 p.font.size = Pt(20)
+                p.font.name = BANGLA_FONT
                 p.font.color.rgb = bullet_rgb
                 p.space_after = Pt(10)
 
-        # watermark (rule-based, no AI)
         if watermark and watermark.get("text"):
             wm_box = slide.shapes.add_textbox(Inches(1.5), Inches(3.2), Inches(7), Inches(1.5))
             wtf = wm_box.text_frame
@@ -95,13 +103,11 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
             wp.alignment = PP_ALIGN.CENTER
             wp.font.size = Pt(40)
             wp.font.bold = True
+            wp.font.name = BANGLA_FONT
             wm_color = _hex_to_rgb(watermark.get("color", "808080"))
             wp.font.color.rgb = wm_color
-            # rotate the shape to fake a diagonal watermark
             if watermark.get("position", "").startswith("diagonal"):
                 wm_box.rotation = -30
-            # opacity isn't directly settable via python-pptx on text fill;
-            # a lighter shade of the chosen color approximates "light" opacity.
             if watermark.get("opacity") == "light":
                 r, g, b = wm_color[0], wm_color[1], wm_color[2]
                 lighten = lambda c: int(c + (255 - c) * 0.6)
@@ -113,9 +119,8 @@ def render_pptx(slides, template: dict, watermark: dict = None, out_path: str = 
 
 def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path="output.pptx"):
     """
-    Samiu's Tuition's own polished practice-slide design (ported from
-    the Node/pptxgenjs script the user already had) — dark header bar
-    with topic label + page counter, right-aligned italic board-
+    Samiu's Tuition's own polished practice-slide design — dark header
+    bar with topic label + page counter, right-aligned italic board-
     reference tag, and the same diagonal watermark style.
 
     slides: list of {"question": str, "tag": str (optional)}
@@ -143,14 +148,14 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
         p.font.size = Pt(30)
         p.font.bold = True
         p.font.italic = True
-        p.font.name = "Georgia"
+        p.font.name = BANGLA_FONT
         mid_rgb = _hex_to_rgb(MID)
         lighten = lambda c: int(c + (255 - c) * 0.84)
         p.font.color.rgb = RGBColor(lighten(mid_rgb[0]), lighten(mid_rgb[1]), lighten(mid_rgb[2]))
         box.rotation = -18
 
     def add_header(slide, label, n):
-        bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(1.05))  # 1 = rectangle
+        bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(1.05))
         bar.fill.solid()
         bar.fill.fore_color.rgb = _hex_to_rgb(DARK)
         bar.line.fill.background()
@@ -159,6 +164,7 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
         ltf.text = label
         ltf.paragraphs[0].font.size = Pt(20)
         ltf.paragraphs[0].font.bold = True
+        ltf.paragraphs[0].font.name = BANGLA_FONT
         ltf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
         if n:
             counter_box = slide.shapes.add_textbox(Inches(12.0), Inches(6.9), Inches(1.1), Inches(0.4))
@@ -166,16 +172,10 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
             ctf.text = f"{n} / {total}"
             ctf.paragraphs[0].alignment = PP_ALIGN.RIGHT
             ctf.paragraphs[0].font.size = Pt(11)
+            ctf.paragraphs[0].font.name = BANGLA_FONT
             ctf.paragraphs[0].font.color.rgb = _hex_to_rgb(MUTED)
 
     def add_question_text(slide, text, y=1.35, h=2.0):
-        """
-        Splits the text on $...$ math segments and renders plain text
-        via normal text boxes, math segments via math_render.py so
-        fractions/roots/trig actually display correctly instead of as
-        broken plain-text characters.
-        """
-        import re
         parts = re.split(r'(\$[^$]+\$)', text)
         cursor_y = y
         for part in parts:
@@ -185,14 +185,13 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
                 try:
                     png_bytes = render_math_to_png_bytes(part, color=INK, fontsize=26)
                     img_stream = BytesIO(png_bytes)
-                    pic = slide.shapes.add_picture(img_stream, Inches(1.5), Inches(cursor_y), height=Inches(0.9))
+                    slide.shapes.add_picture(img_stream, Inches(1.5), Inches(cursor_y), height=Inches(0.9))
                     cursor_y += 1.1
                 except Exception:
-                    # if math rendering fails for any reason, fall back
-                    # to plain text rather than dropping the content
                     box = slide.shapes.add_textbox(Inches(0.7), Inches(cursor_y), Inches(12.0), Inches(0.6))
                     box.text_frame.text = part
                     box.text_frame.paragraphs[0].font.size = Pt(18)
+                    box.text_frame.paragraphs[0].font.name = BANGLA_FONT
                     box.text_frame.paragraphs[0].font.color.rgb = _hex_to_rgb(INK)
                     cursor_y += 0.7
             else:
@@ -201,6 +200,7 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
                 tf.word_wrap = True
                 tf.text = part.strip()
                 tf.paragraphs[0].font.size = Pt(18)
+                tf.paragraphs[0].font.name = BANGLA_FONT
                 tf.paragraphs[0].font.color.rgb = _hex_to_rgb(INK)
                 cursor_y += 0.7
 
@@ -214,9 +214,9 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
         p.font.size = Pt(12)
         p.font.italic = True
         p.font.bold = True
+        p.font.name = BANGLA_FONT
         p.font.color.rgb = _hex_to_rgb(MID)
 
-    # Title slide
     t = prs.slides.add_slide(blank)
     t.background.fill.solid()
     t.background.fill.fore_color.rgb = _hex_to_rgb(BG)
@@ -228,12 +228,13 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
     title_box.text_frame.text = title
     title_box.text_frame.paragraphs[0].font.size = Pt(38)
     title_box.text_frame.paragraphs[0].font.bold = True
-    title_box.text_frame.paragraphs[0].font.name = "Georgia"
+    title_box.text_frame.paragraphs[0].font.name = BANGLA_FONT
     title_box.text_frame.paragraphs[0].font.color.rgb = _hex_to_rgb(DARK)
     if subtitle:
         sub_box = t.shapes.add_textbox(Inches(0.8), Inches(3.6), Inches(11.7), Inches(0.7))
         sub_box.text_frame.text = subtitle
         sub_box.text_frame.paragraphs[0].font.size = Pt(20)
+        sub_box.text_frame.paragraphs[0].font.name = BANGLA_FONT
         sub_box.text_frame.paragraphs[0].font.color.rgb = _hex_to_rgb(MUTED)
     accent_line = t.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(4.45), Inches(1.4), Inches(0.06))
     accent_line.fill.solid()
@@ -246,10 +247,10 @@ def render_pptx_tuition(slides, topic_label, title, subtitle, whatsapp, out_path
     contact_box.text_frame.text = contact_text
     contact_box.text_frame.paragraphs[0].font.size = Pt(15)
     contact_box.text_frame.paragraphs[0].font.italic = True
+    contact_box.text_frame.paragraphs[0].font.name = BANGLA_FONT
     contact_box.text_frame.paragraphs[0].font.color.rgb = _hex_to_rgb(MUTED)
     add_watermark(t)
 
-    # Question slides
     for i, slide_data in enumerate(slides, start=1):
         s = prs.slides.add_slide(blank)
         s.background.fill.solid()

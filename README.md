@@ -31,7 +31,27 @@ watermark instructions.
   releasing PyMuPDF page memory promptly, and reducing gunicorn to a
   single worker with periodic recycling (`--max-requests`) instead of
   2 workers that could together exceed the RAM limit under load.
-- **Bangla PDF text extraction fix:** many real-world Bangla PDFs
+- **Bangla font fix (garbled PDF output):** generated PDFs with Bangla
+  text were coming out as unreadable repeated-character garbage.
+  Root cause: no Bangla-capable font was installed, so LibreOffice's
+  pptx→pdf conversion silently corrupted the missing glyphs. Fixed by
+  installing `fonts-noto-core` + `fonts-lohit-beng-bengali` in the
+  Dockerfile and explicitly setting "Noto Sans Bengali" on every text
+  run in `renderer.py` (not just Latin defaults like Calibri/Georgia).
+  Verified by generating a Bangla PDF and extracting its text back out
+  — fully readable now, confirmed visually too.
+- **Background upload processing (outage fix):** uploading a batch of
+  files used to block the entire app for every visitor until the
+  whole batch finished parsing+labeling (the service ran a single
+  gunicorn worker, and that worker was tied up for the whole request).
+  Fixed by splitting `/org/upload` into two phases: saving files and
+  responding to the user happens immediately (a few hundred ms
+  regardless of batch size), while parsing/AI-labeling now runs in a
+  background thread after the response is sent. Verified: a 3-file
+  batch now returns in ~0.2s instead of blocking, and gunicorn now
+  runs with `--worker-class gthread` so it can serve other requests
+  concurrently.
+- **Bangla PDF text-layer extraction fix (for training uploads):** many real-world Bangla PDFs
   (including ones built by embedding a custom font) don't carry a
   correct Unicode mapping in their text layer — extracting text
   directly yields garbled control-character soup even though the page

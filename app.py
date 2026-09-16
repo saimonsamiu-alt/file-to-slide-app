@@ -420,57 +420,67 @@ def _org_upload_impl():
         return redirect(url_for("org_dashboard"))
 
     import hashlib
-    processed_n, duplicate_n, failed_n, unsupported_n = 0, 0, 0, 0
+    saved_n, duplicate_n = 0, 0
+    to_process = []  # (upload_id, filename, file_bytes) — handed to the background thread
 
+    # Phase 1 (fast, synchronous): just save each file and dedup-check.
+    # No parsing/AI/rendering happens here, so this always returns in
+    # well under a second per file regardless of batch size.
     for f in files[:MAX_TRAIN_UPLOADS]:
-        # Every file is handled independently — one file's DB error or
-        # processing crash must never abort the rest of the batch, and
-        # must never bubble up as a raw "Internal Server Error" page.
-        upload_id = None
         try:
             file_bytes = f.read()
             content_hash = hashlib.sha256(file_bytes).hexdigest()
-
             existing = db.find_upload_by_hash(org["id"], content_hash)
             if existing:
                 duplicate_n += 1
-                continue  # identical file already uploaded — no credit, no reprocessing
-
+                continue
             upload_id = db.add_org_upload(org["id"], user["id"], f.filename, rights_confirmed=True,
                                            file_data=file_bytes, content_hash=content_hash)
             db.add_user_credit(user["id"], 300)  # $3 in-app credit, non-cash (spec Section 7)
-
-            status, parsed_slides = process_upload(f.filename, file_bytes)
-            if status == "processed" and parsed_slides:
-                db.save_parsed_slides(upload_id, org["id"], parsed_slides)
-            db.set_upload_status(upload_id, status)
-            if status == "processed":
-                processed_n += 1
-            elif status == "unsupported_format":
-                unsupported_n += 1
-            else:
-                failed_n += 1
+            saved_n += 1
+            to_process.append((upload_id, f.filename, file_bytes))
         except Exception as exc:
-            logger.error("Train Me upload failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
-            if upload_id:
-                try:
-                    db.set_upload_status(upload_id, "failed")
-                except Exception:
-                    pass
-            failed_n += 1
+            logger.error("Train Me save failed for %s: %s\n%s", f.filename, exc, traceback.format_exc())
+
+    # Phase 2 (slow — parsing + AI labeling + PDF page rendering): runs
+    # in a background thread AFTER this request already returned a
+    # response. This is the fix for the single-worker outage bug: the
+    # web worker is free again immediately, instead of being blocked
+    # for the entire batch (which made the whole app unreachable for
+    # every visitor while a big upload was processing).
+    if to_process:
+        import threading
+        thread = threading.Thread(target=_process_uploads_background, args=(org["id"], to_process), daemon=True)
+        thread.start()
 
     parts = []
-    if processed_n:
-        parts.append(f"{processed_n} processed")
+    if saved_n:
+        parts.append(f"{saved_n} file(s) saved and queued for processing — refresh this page in a bit to see status")
     if duplicate_n:
         parts.append(f"{duplicate_n} skipped as duplicates (already uploaded, no extra credit)")
-    if unsupported_n:
-        parts.append(f"{unsupported_n} unsupported format (only .pptx/.pdf are parsed)")
-    if failed_n:
-        parts.append(f"{failed_n} failed to process (logged for review)")
-    flash("Upload complete — " + ", ".join(parts) + ".")
-
+    flash("Upload received — " + ", ".join(parts) + ".")
     return redirect(url_for("org_dashboard"))
+
+
+def _process_uploads_background(org_id, to_process):
+    """
+    Runs in a background thread, outside the request/response cycle.
+    Parses + AI-labels each file and updates its status when done.
+    Any error here is caught per-file — a crash on one file must never
+    stop the rest of the batch from being processed.
+    """
+    for upload_id, filename, file_bytes in to_process:
+        try:
+            status, parsed_slides = process_upload(filename, file_bytes)
+            if status == "processed" and parsed_slides:
+                db.save_parsed_slides(upload_id, org_id, parsed_slides)
+            db.set_upload_status(upload_id, status)
+        except Exception as exc:
+            logger.error("Background processing failed for %s: %s\n%s", filename, exc, traceback.format_exc())
+            try:
+                db.set_upload_status(upload_id, "failed")
+            except Exception:
+                pass
 
 
 @app.route("/org/reprocess", methods=["POST"])
