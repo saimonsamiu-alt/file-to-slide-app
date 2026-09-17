@@ -72,7 +72,8 @@ def _ai_parse(instruction: str) -> dict:
     )
     text = resp.text.strip()
     text = re.sub(r"^```json|```$", "", text).strip()
-    return json.loads(text)
+    import safe_json
+    return safe_json.loads(text)
 
 
 def parse_instruction(instruction: str) -> dict:

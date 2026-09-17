@@ -381,10 +381,26 @@ def add_org_upload(org_id, uploaded_by, filename, rights_confirmed, file_data=No
     db_file_data = None
 
     if file_data:
+        stored_to_r2 = False
         if storage_r2.is_configured():
-            storage_key = f"org_uploads/{org_id}/{upload_id}_{filename}"
-            storage_r2.upload_bytes(storage_key, file_data)
-        else:
+            try:
+                storage_key = f"org_uploads/{org_id}/{upload_id}_{filename}"
+                storage_r2.upload_bytes(storage_key, file_data)
+                stored_to_r2 = True
+            except Exception as exc:
+                # R2 upload failed (e.g. misconfigured credentials/account
+                # ID) — fall back to storing in Postgres instead of
+                # losing the file entirely and never even creating a
+                # row (which is what used to happen: the exception
+                # propagated out of this function before the INSERT
+                # ran, so the upload silently vanished with no record
+                # at all, not even a "failed" status).
+                import logging
+                logging.getLogger("slideapp").error(
+                    f"R2 upload failed for {filename}, falling back to Postgres storage: {exc}"
+                )
+                storage_key = None
+        if not stored_to_r2:
             db_file_data = file_data
 
     conn = get_db()

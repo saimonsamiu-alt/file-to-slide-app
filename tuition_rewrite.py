@@ -69,5 +69,6 @@ def rewrite_for_tuition(raw_text: str):
     )
     text = resp.text.strip()
     text = re.sub(r"^```json|```$", "", text).strip()
-    data = json.loads(text)
+    import safe_json
+    data = safe_json.loads(text)
     return data.get("topic_label", ""), data.get("slides", [])
