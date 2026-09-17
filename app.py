@@ -469,7 +469,9 @@ def _process_uploads_background(org_id, to_process):
     Any error here is caught per-file — a crash on one file must never
     stop the rest of the batch from being processed.
     """
-    for upload_id, filename, file_bytes in to_process:
+    for i, (upload_id, filename, file_bytes) in enumerate(to_process):
+        if i > 0:
+            time.sleep(2)  # spread out files too — same rate-limit/memory reasoning as within a file
         try:
             status, parsed_slides = process_upload(filename, file_bytes)
             if status == "processed" and parsed_slides:

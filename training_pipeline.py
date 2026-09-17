@@ -11,6 +11,7 @@ this — they need real volume, which this pipeline is what generates.
 """
 
 import os
+import time
 from io import BytesIO
 
 MAX_SLIDES_PER_UPLOAD = 50  # caps AI-labeling cost per upload
@@ -151,7 +152,9 @@ def process_upload(filename, file_bytes):
         return "unsupported_format", []
 
     results = []
-    for slide in slides[:MAX_SLIDES_PER_UPLOAD]:
+    for i, slide in enumerate(slides[:MAX_SLIDES_PER_UPLOAD]):
+        if i > 0:
+            time.sleep(1.2)  # spread out AI calls — avoids bursting past the free-tier rate limit
         category = label_slide(slide["raw_text"], slide["bullet_count"], slide["has_image"])
         results.append({**slide, "category": category})
 
